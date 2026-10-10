@@ -1,0 +1,15 @@
+# Container Manager → Project → Create → point "Path" at this folder
+# (e.g. /volume1/docker/harbour-gateway) and it will build from the Dockerfile.
+services:
+  harbour-gateway:
+    build: .
+    image: harbour-gateway:latest
+    container_name: harbour-gateway
+    user: "1035:100"   # dockerlimited, same as the rest of your stack
+    restart: unless-stopped
+    ports:
+      - "8765:8765"
+    volumes:
+      - ./config:/config:ro
+    environment:
+      - TZ=Australia/Sydney
