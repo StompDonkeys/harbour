@@ -439,3 +439,18 @@ def test_apk_and_log(client):
         assert "Harbour.apk" in r.headers["Content-Disposition"]
     assert client.post("/api/log", json={"text": "boom"}).status_code == 401
     assert client.post("/api/log", json={"text": "boom"}, headers=H).get_json() == {"ok": True}
+
+
+@responses.activate
+def test_qbittorrent_api_key():
+    q = gw.QBittorrent({"url": "http://nas:8080", "api_key": "qbt_abc"})
+    responses.get("http://nas:8080/api/v2/transfer/info", json={"dl_info_speed": 5})
+    responses.get("http://nas:8080/api/v2/torrents/info", json=[])
+    client, items = q.snapshot()
+    assert client["speed"] == 5 and items == []
+    assert all(c.request.headers["Authorization"] == "Bearer qbt_abc" for c in responses.calls)
+    assert not any("auth/login" in c.request.url for c in responses.calls)
+    responses.replace(responses.GET, "http://nas:8080/api/v2/transfer/info", status=401)
+    with pytest.raises(gw.ApiError) as e:
+        q.snapshot()
+    assert "API key rejected" in e.value.message

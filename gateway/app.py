@@ -1188,9 +1188,13 @@ class QBittorrent:
         self.name = conf.get("name", "qBittorrent")
         self.url = conf["url"].rstrip("/")
         self.user, self.pw = conf.get("username") or "", conf.get("password") or ""
+        self.api_key = conf.get("api_key") or ""
         self.s = requests.Session()
         self.lock = threading.Lock()
         self.logged_in = False
+        if self.api_key:
+            # qBittorrent 5.2+: API key instead of username/password (no login, no cookies)
+            self.s.headers["Authorization"] = f"Bearer {self.api_key}"
 
     def login(self):
         r = self.s.post(f"{self.url}/api/v2/auth/login", data={"username": self.user, "password": self.pw},
@@ -1204,9 +1208,12 @@ class QBittorrent:
     def req(self, method, path, ok404=False, **kw):
         for attempt in range(2):
             with self.lock:
-                if not self.logged_in and (self.user or self.pw):
+                if not self.api_key and not self.logged_in and (self.user or self.pw):
                     self.login()
             r = self.s.request(method, f"{self.url}/api/v2{path}", headers={"Referer": self.url}, timeout=15, **kw)
+            if r.status_code in (401, 403) and self.api_key:
+                raise ApiError(f"{self.name}: API key rejected — check it in qBittorrent's Web UI settings "
+                               "(needs qBittorrent 5.2 or newer)", 502)
             if r.status_code == 403 and attempt == 0:
                 self.logged_in = False
                 if not (self.user or self.pw):

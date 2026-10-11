@@ -20,7 +20,7 @@
   },
 
   "qbittorrent": {
-    "name": "qBittorrent", "url": "http://192.168.4.68:8080", "username": "admin", "password": "QBIT_PASSWORD"
+    "name": "qBittorrent", "url": "http://192.168.4.68:8080", "api_key": "qbt_YOUR_API_KEY"
   },
 
   "filestation": {
