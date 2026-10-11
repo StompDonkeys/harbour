@@ -80,8 +80,7 @@ Without the secrets the build still works but is debug-signed with a throwaway k
 
 **First install** (once):
 1. Fire TV → Settings → My Fire TV → Developer options → *Install unknown apps* → turn on for **Downloader** (if Developer options is hidden: Settings → My Fire TV → About → click the device name 7 times).
-2. In Downloader, enter the short link served by your gateway: `192.168.4.68:8765/apk`
-   (it redirects to the newest `Harbour.apk` on GitHub).
+2. In Downloader, enter `http://192.168.4.68:8765/Harbour.apk` — your gateway fetches the newest build from GitHub and hands it straight to Downloader.
 3. Open Harbour → enter `http://192.168.4.68:8765` and your token → **Test & save**.
 
 **Updates:** Harbour checks GitHub at launch. When a newer build exists you get a message and a dot on Settings; go to **Settings → Install**. The first time, Fire OS asks you to allow Harbour to install apps (Developer options → Install unknown apps → Harbour → On). Your settings are kept.

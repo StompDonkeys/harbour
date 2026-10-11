@@ -23,7 +23,7 @@ from datetime import datetime, timedelta, timezone
 from urllib.parse import quote, urlsplit
 
 import requests
-from flask import Flask, Response, jsonify, request
+from flask import Flask, Response, jsonify, request, stream_with_context
 
 VERSION = "0.2.0"
 CONFIG_PATH = os.environ.get("HARBOUR_CONFIG", "/config/config.json")
@@ -1327,7 +1327,7 @@ def warm_loop():
         time.sleep(240)
 
 
-PUBLIC = ("/", "/apk")
+PUBLIC = ("/", "/apk", "/Harbour.apk")
 
 
 @app.before_request
@@ -1367,10 +1367,19 @@ def root():
 
 
 @app.get("/apk")
+@app.get("/Harbour.apk")
 def apk():
-    """Short link for Downloader: http://<nas>:8765/apk → newest Harbour.apk on GitHub."""
+    """Short link for Downloader: http://<nas>:8765/Harbour.apk streams the newest APK from GitHub.
+    Served directly (not a redirect) with an .apk name and type, so Downloader installs it."""
     repo = CFG.get("github_repo") or DEFAULT_REPO
-    return Response(status=302, headers={"Location": f"https://github.com/{repo}/releases/latest/download/Harbour.apk"})
+    r = requests.get(f"https://github.com/{repo}/releases/latest/download/Harbour.apk", stream=True, timeout=60)
+    if r.status_code >= 400:
+        return jsonify(error=f"GitHub returned HTTP {r.status_code}"), 502
+    headers = {"Content-Disposition": 'attachment; filename="Harbour.apk"'}
+    if r.headers.get("Content-Length"):
+        headers["Content-Length"] = r.headers["Content-Length"]
+    return Response(stream_with_context(r.iter_content(64 * 1024)),
+                    mimetype="application/vnd.android.package-archive", headers=headers)
 
 
 @app.get("/api/ping")

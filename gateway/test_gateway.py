@@ -428,8 +428,14 @@ def test_downloads(client):
     del gw.CFG["nzbget"], gw.CFG["qbittorrent"]
 
 
+@responses.activate
 def test_apk_and_log(client):
-    r = client.get("/apk")
-    assert r.status_code == 302 and r.headers["Location"].endswith("/releases/latest/download/Harbour.apk")
+    responses.get("https://github.com/StompDonkeys/harbour/releases/latest/download/Harbour.apk",
+                  body=b"PK-fake-apk", headers={"Content-Length": "11"})
+    for path in ("/apk", "/Harbour.apk"):
+        r = client.get(path)
+        assert r.status_code == 200 and r.data == b"PK-fake-apk"
+        assert r.mimetype == "application/vnd.android.package-archive"
+        assert "Harbour.apk" in r.headers["Content-Disposition"]
     assert client.post("/api/log", json={"text": "boom"}).status_code == 401
     assert client.post("/api/log", json={"text": "boom"}, headers=H).get_json() == {"ok": True}
