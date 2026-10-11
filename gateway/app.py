@@ -893,6 +893,7 @@ class Seerr(HomeCache):
                       ("Seasons", d.get("numberOfSeasons")),
                       ("Rating", f"{d['voteAverage']:.1f}" if d.get("voteAverage") else None),
                       ("Genres", genres), ("Network", network), ("Status", d.get("status")))
+        f += self.library_facts(mt, d)
         choose = self.folder_choice(mt, False)
         acts = []
         if st not in REQUESTED:
@@ -916,10 +917,66 @@ class Seerr(HomeCache):
                     "actions": [] if ss in REQUESTED else
                     [action("request_season", f"Request season {n}", "primary", arg=str(n), choose=choose)],
                 }))
+        for svc_, m in self.library_matches(mt, d):
+            acts.append(action("open", f"Open in {svc_.name}", opens="item", arg=f"{svc_.kind}/{svc_.inst}/{m['id']}"))
+        if mi.get("id") and (st or mi.get("status4k") or mi.get("requests")):
+            title = d.get("title") or d.get("name") or "this"
+            acts.append(action("clear", f"Remove from {self.name}", "danger",
+                               confirm=f"Clear “{title}” from {self.name}? Its requests and status are wiped so it "
+                                       f"can be requested again. Files, Radarr and Sonarr aren't touched."))
         return {"item": self.card(d, mt), "facts": f, "actions": acts, "seasons": seasons}
+
+    # -- what's actually in Radarr/Sonarr for this title
+    def library_matches(self, mt, d):
+        out = []
+        if mt == "movie":
+            for s in SERVICES.values():
+                if isinstance(s, Radarr):
+                    m = next((m for m in safe(s.movies, f"{s.name} movies", []) if m.get("tmdbId") == d.get("id")), None)
+                    if m:
+                        out.append((s, m))
+        else:
+            tvdb = (d.get("externalIds") or {}).get("tvdbId")
+            for s in SERVICES.values():
+                if isinstance(s, Sonarr):
+                    m = next((x for x in safe(s.series, f"{s.name} series", [])
+                              if (tvdb and x.get("tvdbId") == tvdb) or x.get("tmdbId") == d.get("id")), None)
+                    if m:
+                        out.append((s, m))
+        return out
+
+    def library_facts(self, mt, d):
+        rows = []
+        for s, m in self.library_matches(mt, d):
+            if mt == "movie":
+                if m.get("hasFile"):
+                    mi = (m.get("movieFile") or {}).get("mediaInfo") or {}
+                    rows += [
+                        (s.name, join("Downloaded", Radarr.quality(m), fmt_size(m.get("sizeOnDisk")))),
+                        (f"{s.name} video", join(mi.get("resolution"), mi.get("videoCodec"), mi.get("videoDynamicRangeType"))),
+                        (f"{s.name} audio", join(mi.get("audioCodec"), mi.get("audioChannels"), mi.get("audioLanguages"))),
+                        (f"{s.name} path", (m.get("movieFile") or {}).get("path") or m.get("path")),
+                    ]
+                else:
+                    rows.append((s.name, "In library · not downloaded yet" + ("" if m.get("monitored") else " · unmonitored")))
+            else:
+                st = m.get("statistics") or {}
+                rows += [
+                    (s.name, join(f"{st.get('episodeFileCount', 0)} of {st.get('episodeCount', 0)} episodes",
+                                  fmt_size(st.get("sizeOnDisk")) if st.get("sizeOnDisk") else None)),
+                    (f"{s.name} path", m.get("path")),
+                ]
+        return facts(*rows)
 
     def act(self, item_id, act, arg=None, choice=None):
         mt, tid = self._split(item_id)
+        if act == "clear":
+            mid = ((self._req("GET", f"/{mt}/{tid}").get("mediaInfo")) or {}).get("id")
+            if not mid:
+                raise ApiError("Nothing to clear — it isn't tracked by Seerr")
+            self._req("DELETE", f"/media/{mid}")
+            self.drop_home()
+            return {"message": f"Cleared from {self.name}", "refresh": True}
         body = {"mediaType": mt, "mediaId": tid, "is4k": act == "request4k"}
         if act in ("request", "request4k"):
             if mt == "tv":

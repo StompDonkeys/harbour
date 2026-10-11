@@ -454,3 +454,24 @@ def test_qbittorrent_api_key():
     with pytest.raises(gw.ApiError) as e:
         q.snapshot()
     assert "API key rejected" in e.value.message
+
+
+@responses.activate
+def test_seerr_library_facts_and_clear(client):
+    m = dict(MOVIES[1], tmdbId=777)   # Movie 2 has a 4K file
+    responses.get("http://nas:7878/api/v3/movie", json=[m])
+    responses.get("http://nas:7879/api/v3/movie", json=[])
+    responses.get("http://nas:5055/api/v1/service/radarr", json=[])
+    responses.get("http://nas:5055/api/v1/movie/777", json={"id": 777, "title": "Dune",
+                  "mediaInfo": {"id": 55, "status": 5}})
+    d = client.get("/api/svc/seerr/seerr/item/movie-777", headers=H).get_json()
+    labels = {f["label"]: f["value"] for f in d["facts"]}
+    assert labels["Movies"].startswith("Downloaded · Bluray-2160p") and "TrueHD" in labels["Movies audio"]
+    ids = [a["id"] for a in d["actions"]]
+    assert ids == ["open", "clear"]
+    assert d["actions"][0] == {"id": "open", "label": "Open in Movies", "arg": "radarr/radarr/2", "opens": "item"}
+
+    responses.delete("http://nas:5055/api/v1/media/55", status=204)
+    r = client.post("/api/svc/seerr/seerr/item/movie-777/action", json={"action": "clear"}, headers=H).get_json()
+    assert r["message"] == "Cleared from Discover"
+    assert responses.calls[-1].request.method == "DELETE"

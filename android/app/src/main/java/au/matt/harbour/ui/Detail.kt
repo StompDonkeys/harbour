@@ -60,6 +60,7 @@ fun DetailScreen(
     itemId: String,
     onClose: () -> Unit,
     onOpenReleases: (arg: String?, title: String) -> Unit,
+    onOpenItem: (ref: String) -> Unit = {},
 ) {
     val gw = LocalGateway.current
     val toaster = LocalToaster.current
@@ -105,6 +106,7 @@ fun DetailScreen(
     val trigger: (ActionDef) -> Unit = { a ->
         when {
             a.opens == "releases" -> onOpenReleases(a.arg, detail?.item?.title ?: "")
+            a.opens == "item" && a.arg != null -> onOpenItem(a.arg)
             a.choose != null && a.choose.options.size > 1 -> choosing = a
             else -> afterChoice(a, a.choose?.options?.firstOrNull()?.value)
         }

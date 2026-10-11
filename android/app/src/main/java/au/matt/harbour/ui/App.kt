@@ -2,6 +2,7 @@ package au.matt.harbour.ui
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.focusGroup
 import androidx.compose.foundation.layout.Arrangement
@@ -40,11 +41,13 @@ import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.zIndex
+import au.matt.harbour.R
 import au.matt.harbour.data.CrashReporter
 import au.matt.harbour.data.Gateway
 import au.matt.harbour.data.GatewayConfig
@@ -228,6 +231,14 @@ private fun MainShell(config: GatewayConfig, settings: @Composable () -> Unit, u
                             itemId = screen.itemId,
                             onClose = { pop() },
                             onOpenReleases = { arg, title -> push(Screen.Releases(screen.svc, screen.itemId, arg, title)) },
+                            onOpenItem = { ref ->
+                                // "kind/inst/id", e.g. radarr/radarr-truehd/123 — jump to that app's page
+                                val parts = ref.split("/", limit = 3)
+                                val target = config.services.firstOrNull {
+                                    parts.size == 3 && it.kind == parts[0] && it.inst == parts[1]
+                                }
+                                if (target != null) push(Screen.Detail(target, parts[2]))
+                            },
                         )
                         is Screen.Browse -> BrowseScreen(
                             svc = screen.svc,
@@ -295,19 +306,23 @@ private fun NavRail(
             .padding(horizontal = 12.dp, vertical = 30.dp),
         verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
-        Box(
+        Row(
             Modifier
-                .height(44.dp)
-                .padding(start = 12.dp),
-            contentAlignment = Alignment.CenterStart,
+                .height(48.dp)
+                .padding(start = 2.dp),
+            verticalAlignment = Alignment.CenterVertically,
         ) {
-            Text(
-                if (expanded) title else title.take(1),
-                color = HColors.Accent,
-                fontSize = 22.sp,
-                fontWeight = FontWeight.Black,
-                maxLines = 1,
+            Image(
+                painter = painterResource(R.drawable.logo),
+                contentDescription = title,
+                modifier = Modifier
+                    .size(48.dp)
+                    .clip(RoundedCornerShape(12.dp)),
             )
+            if (expanded) {
+                Spacer(Modifier.width(12.dp))
+                Text(title, color = HColors.Text, fontSize = 20.sp, fontWeight = FontWeight.Bold, maxLines = 1)
+            }
         }
         Spacer(Modifier.height(18.dp))
         tabs.forEachIndexed { i, tab ->
