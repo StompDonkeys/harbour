@@ -565,3 +565,65 @@ fun BusyDialog(label: String) {
         }
     }
 }
+
+// ------------------------------------------------------------------ menus & pickers
+
+/** A vertical list of full-width buttons in a dialog — used for "what do you want to do with this?". */
+@Composable
+fun MenuDialog(
+    title: String,
+    subtitle: String? = null,
+    items: List<Pair<String, String?>>,   // label to style
+    onPick: (Int) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val first = remember { FocusRequester() }
+    Dialog(onDismissRequest = onDismiss) {
+        DialogCard {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text(title, color = HColors.Text, fontSize = 18.sp, fontWeight = FontWeight.Bold,
+                    maxLines = 3, overflow = TextOverflow.Ellipsis)
+                if (subtitle != null) {
+                    Text(subtitle, color = HColors.TextDim, fontSize = 13.sp, maxLines = 4,
+                        overflow = TextOverflow.Ellipsis)
+                }
+                Spacer(Modifier.height(4.dp))
+                items.forEachIndexed { i, (label, style) ->
+                    TvButton(label, { onPick(i) }, Modifier.fillMaxWidth(), style = style,
+                        focusRequester = if (i == 0) first else null, fill = true)
+                }
+                TvButton("Cancel", onDismiss, Modifier.fillMaxWidth(), fill = true)
+            }
+        }
+    }
+    LaunchedEffect(Unit) {
+        delay(60)
+        runCatching { first.requestFocus() }
+    }
+}
+
+fun fmtBytes(bytes: Long): String {
+    var b = bytes.toDouble()
+    val units = listOf("B", "KB", "MB", "GB", "TB")
+    var i = 0
+    while (b >= 1024 && i < units.lastIndex) {
+        b /= 1024
+        i++
+    }
+    return if (i <= 2) "%.0f %s".format(b, units[i]) else "%.1f %s".format(b, units[i])
+}
+
+fun fmtSpeed(bytesPerSec: Long): String = if (bytesPerSec <= 0) "—" else fmtBytes(bytesPerSec) + "/s"
+
+fun fmtEta(seconds: Long): String {
+    if (seconds < 0) return "∞"
+    val h = seconds / 3600
+    val m = (seconds % 3600) / 60
+    val s = seconds % 60
+    return when {
+        h >= 24 -> "${h / 24}d ${h % 24}h"
+        h > 0 -> "${h}h ${m}m"
+        m > 0 -> "${m}m ${s}s"
+        else -> "${s}s"
+    }
+}

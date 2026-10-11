@@ -38,6 +38,9 @@ data class GatewayConfig(
     val name: String = "Harbour",
     val services: List<ServiceInfo> = emptyList(),
     val files: Boolean = false,
+    val downloads: Boolean = false,
+    val repo: String = "StompDonkeys/harbour",
+    val version: String = "",
 )
 
 @Serializable
@@ -71,12 +74,22 @@ data class HomePage(
 data class Fact(val label: String, val value: String)
 
 @Serializable
+data class ChoiceOption(val label: String, val value: String)
+
+@Serializable
+data class Choice(val title: String, val options: List<ChoiceOption> = emptyList())
+
+@Serializable
 data class ActionDef(
     val id: String,
     val label: String,
     val style: String? = null,
     val confirm: String? = null,
     val arg: String? = null,
+    /** e.g. "releases": the app opens that screen instead of calling the gateway. */
+    val opens: String? = null,
+    /** Ask the user to pick one of these first; the pick is sent as `choice`. */
+    val choose: Choice? = null,
 )
 
 @Serializable
@@ -86,7 +99,7 @@ data class Episode(
     val title: String,
     val subtitle: String? = null,
     val hasFile: Boolean = false,
-    val action: ActionDef? = null,
+    val actions: List<ActionDef> = emptyList(),
 )
 
 @Serializable
@@ -94,7 +107,7 @@ data class Season(
     val number: Int,
     val label: String,
     val subtitle: String? = null,
-    val action: ActionDef? = null,
+    val actions: List<ActionDef> = emptyList(),
     val episodes: List<Episode> = emptyList(),
 )
 
@@ -115,6 +128,61 @@ data class ActionResult(
 
 @Serializable
 data class SearchResult(val items: List<MediaItem> = emptyList())
+
+@Serializable
+data class Release(
+    val guid: String,
+    val indexerId: Int = 0,
+    val title: String,
+    val quality: String? = null,
+    val size: Long = 0,
+    val indexer: String? = null,
+    val age: String? = null,
+    val peers: String? = null,
+    val protocol: String? = null,
+    val approved: Boolean = false,
+    val rejections: List<String> = emptyList(),
+    val score: Int? = null,
+)
+
+@Serializable
+data class ReleaseList(val items: List<Release> = emptyList())
+
+@Serializable
+data class DlClient(
+    val id: String,
+    val name: String,
+    val kind: String = "",
+    val speed: Long = 0,
+    val paused: Boolean = false,
+    val count: Int = 0,
+    val seeding: Int = 0,
+    val error: String? = null,
+)
+
+@Serializable
+data class DlItem(
+    val client: String,
+    val clientName: String = "",
+    val id: String,
+    val name: String,
+    val status: String = "",
+    val progress: Float = 0f,
+    val size: Long = 0,
+    val left: Long = 0,
+    val speed: Long = 0,
+    val eta: Long = -1,
+    val category: String? = null,
+    val paused: Boolean = false,
+    val canTop: Boolean = false,
+    val canDeleteFiles: Boolean = false,
+)
+
+@Serializable
+data class Downloads(
+    val clients: List<DlClient> = emptyList(),
+    val items: List<DlItem> = emptyList(),
+)
 
 @Serializable
 data class FileEntry(
@@ -211,11 +279,37 @@ suspend fun Gateway.detail(s: ServiceInfo, id: String): Detail =
 suspend fun Gateway.search(s: ServiceInfo, q: String): SearchResult =
     get("/api/svc/${s.kind}/${s.inst}/search?q=${Gateway.enc(q)}")
 
-suspend fun Gateway.runAction(s: ServiceInfo, id: String, a: ActionDef): ActionResult =
+suspend fun Gateway.runAction(s: ServiceInfo, id: String, a: ActionDef, choice: String? = null): ActionResult =
     post("/api/svc/${s.kind}/${s.inst}/item/${Gateway.enc(id)}/action", buildJsonObject {
         put("action", a.id)
         if (a.arg != null) put("arg", a.arg)
+        if (choice != null) put("choice", choice)
     })
+
+suspend fun Gateway.releases(s: ServiceInfo, id: String, arg: String?): ReleaseList =
+    get("/api/svc/${s.kind}/${s.inst}/item/${Gateway.enc(id)}/releases?arg=${Gateway.enc(arg ?: "")}")
+
+suspend fun Gateway.grab(s: ServiceInfo, id: String, r: Release): ActionResult =
+    post("/api/svc/${s.kind}/${s.inst}/item/${Gateway.enc(id)}/grab", buildJsonObject {
+        put("guid", r.guid)
+        put("indexerId", r.indexerId)
+    })
+
+suspend fun Gateway.downloads(): Downloads = get("/api/downloads")
+
+suspend fun Gateway.downloadAction(client: String, id: String?, action: String): ActionResult =
+    post("/api/downloads/action", buildJsonObject {
+        put("client", client)
+        if (id != null) put("id", id)
+        put("action", action)
+    })
+
+suspend fun Gateway.report(text: String, version: String): Unit {
+    call("POST", "/api/log", buildJsonObject {
+        put("text", text)
+        put("version", version)
+    }.toString())
+}
 
 suspend fun Gateway.listFiles(path: String): FileListing = get("/api/files/list?path=${Gateway.enc(path)}")
 

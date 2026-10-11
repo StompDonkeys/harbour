@@ -33,6 +33,7 @@ fun iconFor(icon: String?): String = when (icon) {
     "tv" -> "📺"
     "discover" -> "✨"
     "files" -> "📁"
+    "downloads" -> "⬇️"
     "settings" -> "⚙️"
     else -> "▪️"
 }

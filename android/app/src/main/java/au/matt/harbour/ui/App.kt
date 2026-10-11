@@ -14,13 +14,16 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
@@ -30,26 +33,35 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.zIndex
+import au.matt.harbour.data.CrashReporter
 import au.matt.harbour.data.Gateway
 import au.matt.harbour.data.GatewayConfig
 import au.matt.harbour.data.Prefs
 import au.matt.harbour.data.ServiceInfo
+import au.matt.harbour.data.UpdateInfo
+import au.matt.harbour.data.Updater
 import au.matt.harbour.data.config
+import au.matt.harbour.data.home
+import au.matt.harbour.data.report
 
 sealed interface Screen {
     data class Library(val svc: ServiceInfo) : Screen
     data class Detail(val svc: ServiceInfo, val itemId: String) : Screen
     data class Browse(val svc: ServiceInfo, val searchFirst: Boolean) : Screen
+    data class Releases(val svc: ServiceInfo, val itemId: String, val arg: String?, val title: String) : Screen
+    data object Downloads : Screen
     data object Files : Screen
     data object Settings : Screen
 }
@@ -61,6 +73,7 @@ private val RailExpanded = 228.dp
 
 @Composable
 fun HarbourApp(prefs: Prefs) {
+    val context = LocalContext.current
     var url by remember { mutableStateOf(prefs.url) }
     var token by remember { mutableStateOf(prefs.token) }
     val gateway = remember(url, token) { if (url.isBlank()) null else Gateway(url, token) }
@@ -68,19 +81,37 @@ fun HarbourApp(prefs: Prefs) {
     var configError by remember { mutableStateOf<String?>(null) }
     var reloadKey by remember { mutableIntStateOf(0) }
     var showSettings by remember { mutableStateOf(false) }
+    var update by remember { mutableStateOf<UpdateInfo?>(null) }
     val toaster = remember { Toaster() }
     val cache = remember(gateway) { ScreenCache() }
 
     LaunchedEffect(gateway, reloadKey) {
         loadedConfig = null
         configError = null
-        val g = gateway
-        if (g != null) {
-            try {
-                loadedConfig = g.config()
-            } catch (e: Exception) {
-                configError = e.message ?: e.javaClass.simpleName
+        val g = gateway ?: return@LaunchedEffect
+        val cfg = try {
+            g.config()
+        } catch (e: Exception) {
+            configError = e.message ?: e.javaClass.simpleName
+            return@LaunchedEffect
+        }
+        loadedConfig = cfg
+        // A crash last session? Send it to the gateway log so it can be diagnosed.
+        CrashReporter.pending(context)?.let { text ->
+            runCatching {
+                g.report(text, Updater.installedVersionName(context))
+                CrashReporter.clear(context)
+                toaster.show("Harbour closed unexpectedly last time — details sent to the gateway log")
             }
+        }
+        // Warm every library so switching tabs is instant.
+        for (s in cfg.services) {
+            if (cache.homes[s.key] == null) runCatching { cache.homes[s.key] = g.home(s) }
+        }
+        // Quietly look for a newer build on GitHub.
+        runCatching { Updater.check(context, cfg.repo) }.getOrNull()?.let {
+            update = it
+            toaster.show("Harbour ${it.versionName} is available — open Settings to install")
         }
     }
 
@@ -93,7 +124,15 @@ fun HarbourApp(prefs: Prefs) {
         reloadKey++
     }
     val settings: @Composable () -> Unit = {
-        SettingsScreen(initialUrl = url, initialToken = token, firstRun = gateway == null, onSaved = onSaved)
+        SettingsScreen(
+            initialUrl = url,
+            initialToken = token,
+            firstRun = gateway == null,
+            onSaved = onSaved,
+            repo = loadedConfig?.repo ?: "StompDonkeys/harbour",
+            update = update,
+            onUpdateFound = { update = it },
+        )
     }
 
     CompositionLocalProvider(LocalToaster provides toaster, LocalCache provides cache) {
@@ -119,7 +158,7 @@ fun HarbourApp(prefs: Prefs) {
                 Loading()
             } else {
                 CompositionLocalProvider(LocalGateway provides gw) {
-                    MainShell(cfg, settings)
+                    MainShell(cfg, settings, updateAvailable = update != null)
                 }
             }
             ToastHost(toaster, Modifier.align(Alignment.BottomEnd))
@@ -128,10 +167,11 @@ fun HarbourApp(prefs: Prefs) {
 }
 
 @Composable
-private fun MainShell(config: GatewayConfig, settings: @Composable () -> Unit) {
+private fun MainShell(config: GatewayConfig, settings: @Composable () -> Unit, updateAvailable: Boolean) {
     val tabs = remember(config) {
         buildList {
             config.services.forEach { add(Tab(it.name, iconFor(it.icon ?: it.kind), Screen.Library(it))) }
+            if (config.downloads) add(Tab("Downloads", iconFor("downloads"), Screen.Downloads))
             if (config.files) add(Tab("Files", iconFor("files"), Screen.Files))
             add(Tab("Settings", iconFor("settings"), Screen.Settings))
         }
@@ -143,6 +183,7 @@ private fun MainShell(config: GatewayConfig, settings: @Composable () -> Unit) {
     val holder = rememberSaveableStateHolder()
 
     fun selectTab(i: Int) {
+        if (i == tabIndex && stack.size == 1) return
         tabIndex = i
         stack.clear()
         stack.add(tabs[i].root)
@@ -171,21 +212,39 @@ private fun MainShell(config: GatewayConfig, settings: @Composable () -> Unit) {
         ) {
             val index = stack.lastIndex
             val screen = stack.last()
-            holder.SaveableStateProvider("$index:$screen") {
-                when (screen) {
-                    is Screen.Library -> LibraryScreen(
-                        svc = screen.svc,
-                        onOpen = { id -> push(Screen.Detail(screen.svc, id)) },
-                        onBrowse = { search -> push(Screen.Browse(screen.svc, search)) },
-                    )
-                    is Screen.Detail -> DetailScreen(screen.svc, screen.itemId, onClose = { pop() })
-                    is Screen.Browse -> BrowseScreen(
-                        svc = screen.svc,
-                        searchFirst = screen.searchFirst,
-                        onOpen = { id -> push(Screen.Detail(screen.svc, id)) },
-                    )
-                    Screen.Files -> FilesScreen()
-                    Screen.Settings -> settings()
+            val stateKey = "$index:$screen"
+            // key() gives each screen its own slot in the composition, so switching tabs
+            // tears the old screen down completely instead of re-using its pieces.
+            key(stateKey) {
+                holder.SaveableStateProvider(stateKey) {
+                    when (screen) {
+                        is Screen.Library -> LibraryScreen(
+                            svc = screen.svc,
+                            onOpen = { id -> push(Screen.Detail(screen.svc, id)) },
+                            onBrowse = { search -> push(Screen.Browse(screen.svc, search)) },
+                        )
+                        is Screen.Detail -> DetailScreen(
+                            svc = screen.svc,
+                            itemId = screen.itemId,
+                            onClose = { pop() },
+                            onOpenReleases = { arg, title -> push(Screen.Releases(screen.svc, screen.itemId, arg, title)) },
+                        )
+                        is Screen.Browse -> BrowseScreen(
+                            svc = screen.svc,
+                            searchFirst = screen.searchFirst,
+                            onOpen = { id -> push(Screen.Detail(screen.svc, id)) },
+                        )
+                        is Screen.Releases -> ReleasesScreen(
+                            svc = screen.svc,
+                            itemId = screen.itemId,
+                            arg = screen.arg,
+                            title = screen.title,
+                            onDone = { pop() },
+                        )
+                        Screen.Downloads -> DownloadsScreen()
+                        Screen.Files -> FilesScreen()
+                        Screen.Settings -> settings()
+                    }
                 }
             }
         }
@@ -196,6 +255,7 @@ private fun MainShell(config: GatewayConfig, settings: @Composable () -> Unit) {
             requesters = railRequesters,
             onSelect = { selectTab(it) },
             onFocusChanged = { railFocused = it },
+            dotOn = if (updateAvailable) tabs.lastIndex else -1,
             modifier = Modifier.zIndex(2f),
         )
     }
@@ -210,6 +270,7 @@ private fun NavRail(
     requesters: List<FocusRequester>,
     onSelect: (Int) -> Unit,
     onFocusChanged: (Boolean) -> Unit,
+    dotOn: Int,
     modifier: Modifier = Modifier,
 ) {
     var expanded by remember { mutableStateOf(false) }
@@ -291,6 +352,16 @@ private fun NavRail(
                             .width(3.dp)
                             .height(22.dp)
                             .background(HColors.Accent),
+                    )
+                }
+                if (i == dotOn) {
+                    Box(
+                        Modifier
+                            .align(Alignment.TopEnd)
+                            .padding(6.dp)
+                            .size(9.dp)
+                            .clip(CircleShape)
+                            .background(HColors.Warn),
                     )
                 }
             }

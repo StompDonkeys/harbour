@@ -94,7 +94,8 @@ def test_radarr_home_detail_actions(client):
     d = client.get("/api/svc/radarr/radarr/item/2", headers=H).get_json()
     labels = {f["label"]: f["value"] for f in d["facts"]}
     assert labels["Audio"].startswith("TrueHD Atmos") and labels["Size"] == "55.9 GB"
-    assert [a["id"] for a in d["actions"]] == ["search", "unmonitor", "delete", "delete_files"]
+    assert [a["id"] for a in d["actions"]] == ["search", "releases", "unmonitor", "delete", "delete_files"]
+    assert d["actions"][1]["opens"] == "releases"
 
     responses.post("http://nas:7878/api/v3/command", json={})
     r = client.post("/api/svc/radarr/radarr/item/2/action", json={"action": "search"}, headers=H).get_json()
@@ -138,12 +139,14 @@ def test_sonarr(client):
         {"id": 6, "seasonNumber": 1, "episodeNumber": 3, "title": "C", "hasFile": False,
          "airDateUtc": iso(now + timedelta(days=3))},
         {"id": 9, "seasonNumber": 0, "episodeNumber": 1, "title": "Sp", "hasFile": False}])
+    responses.get("http://nas:8989/api/v3/wanted/missing", json={"records": []})
     d = client.get("/api/svc/sonarr/sonarr/item/1", headers=H).get_json()
     assert [s["label"] for s in d["seasons"]] == ["Season 1", "Specials"]
     eps = d["seasons"][0]["episodes"]
     assert [e["label"] for e in eps] == ["E01", "E02", "E03"]
-    assert eps[1]["subtitle"].endswith("Missing") and eps[2]["subtitle"].endswith("Not aired")
-    assert d["seasons"][0]["action"] == {"id": "season_search", "label": "Search season", "arg": "1"}
+    assert "Missing" in eps[1]["subtitle"] and "Not aired" in eps[2]["subtitle"]
+    assert [a["id"] for a in d["seasons"][0]["actions"]] == ["season_search", "releases", "season_unmonitor"]
+    assert [a["id"] for a in eps[0]["actions"]] == ["episode_search", "releases", "episode_monitor"]
 
     responses.post("http://nas:8989/api/v3/command", json={})
     client.post("/api/svc/sonarr/sonarr/item/1/action", json={"action": "season_search", "arg": "1"}, headers=H)
@@ -177,19 +180,27 @@ def test_seerr(client):
     s = client.get("/api/svc/seerr/seerr/search?q=the bear", headers=H).get_json()
     assert s["items"][0]["id"] == "tv-10"
 
+    responses.get("http://nas:5055/api/v1/service/sonarr", json=[{"id": 0, "name": "Sonarr", "is4k": False,
+        "isDefault": True, "activeDirectory": "/data/media/tv", "activeProfileId": 4}])
+    responses.get("http://nas:5055/api/v1/service/sonarr/0", json={"rootFolders": [
+        {"id": 1, "path": "/data/media/kids", "freeSpace": 2e12}, {"id": 2, "path": "/data/media/tv", "freeSpace": 2e12}]})
     responses.get("http://nas:5055/api/v1/tv/10", json={
         "id": 10, "name": "The Bear", "numberOfSeasons": 2, "firstAirDate": "2022-06-23",
         "seasons": [{"seasonNumber": 0, "episodeCount": 2}, {"seasonNumber": 1, "episodeCount": 8, "name": "Season 1"},
                     {"seasonNumber": 2, "episodeCount": 10, "name": "Season 2"}],
         "mediaInfo": {"status": 4, "seasons": [{"seasonNumber": 1, "status": 5}]}})
     d = client.get("/api/svc/seerr/seerr/item/tv-10", headers=H).get_json()
-    assert [a["id"] for a in d["actions"]] == ["request", "request4k"]
-    assert [s.get("action", {}).get("id") for s in d["seasons"]] == [None, "request_season"]
+    assert [a["id"] for a in d["actions"]] == ["request"]  # no 4K Sonarr → no 4K button
+    opts = d["actions"][0]["choose"]["options"]
+    assert opts[0]["value"] == "0|4|/data/media/tv" and opts[0]["label"].endswith("(default)")
+    assert [[a["id"] for a in s.get("actions", [])] for s in d["seasons"]] == [[], ["request_season"]]
 
     responses.post("http://nas:5055/api/v1/request", json={})
-    client.post("/api/svc/seerr/seerr/item/tv-10/action", json={"action": "request"}, headers=H)
+    client.post("/api/svc/seerr/seerr/item/tv-10/action",
+                json={"action": "request", "choice": "0|4|/data/media/kids"}, headers=H)
     assert json.loads(responses.calls[-1].request.body) == {"mediaType": "tv", "mediaId": 10, "is4k": False,
-                                                            "seasons": [1, 2]}
+                                                            "seasons": [1, 2], "serverId": 0, "profileId": 4,
+                                                            "rootFolder": "/data/media/kids"}
     client.post("/api/svc/seerr/seerr/item/tv-10/action", json={"action": "request_season", "arg": "2"}, headers=H)
     assert json.loads(responses.calls[-1].request.body)["seasons"] == [2]
 
@@ -265,3 +276,160 @@ def test_filestation(client):
                        headers=H).get_json()["message"] == "Deleted"
     assert client.post("/api/files/op", json={"op": "mkdir", "path": "/video", "name": "New"},
                        headers=H).status_code == 200
+
+
+# ---------------------------------------------------------------- v0.2 features
+
+@responses.activate
+def test_manual_search_and_grab(client):
+    rel = [{"guid": "g1", "indexerId": 3, "title": "Movie.2160p", "size": 50e9, "indexer": "NZBgeek",
+            "protocol": "usenet", "approved": False, "rejections": ["Not an upgrade"], "age": 3,
+            "quality": {"quality": {"name": "Bluray-2160p"}}, "customFormatScore": 100},
+           {"guid": "g2", "indexerId": 4, "title": "Movie.1080p", "size": 9e9, "indexer": "TL",
+            "protocol": "torrent", "seeders": 42, "approved": True, "rejections": [], "ageHours": 5.5,
+            "customFormatScore": 10}]
+    responses.get("http://nas:7878/api/v3/release", json=rel)
+    r = client.get("/api/svc/radarr/radarr/item/2/releases?arg=movie", headers=H).get_json()
+    assert [i["guid"] for i in r["items"]] == ["g2", "g1"]  # approved first
+    assert r["items"][0]["peers"] == "42 seeders" and r["items"][0]["age"] == "5h"
+    assert r["items"][1]["rejections"] == ["Not an upgrade"] and r["items"][1]["age"] == "3d"
+    assert "movieId=2" in responses.calls[-1].request.url
+
+    responses.post("http://nas:7878/api/v3/release", json={})
+    r = client.post("/api/svc/radarr/radarr/item/2/grab", json={"guid": "g2", "indexerId": 4}, headers=H)
+    assert r.status_code == 200 and json.loads(responses.calls[-1].request.body) == {"guid": "g2", "indexerId": 4}
+
+    responses.get("http://nas:8989/api/v3/release", json=[])
+    client.get("/api/svc/sonarr/sonarr/item/1/releases?arg=episode:55", headers=H)
+    assert "episodeId=55" in responses.calls[-1].request.url
+    client.get("/api/svc/sonarr/sonarr/item/1/releases?arg=season:2", headers=H)
+    assert "seasonNumber=2" in responses.calls[-1].request.url and "seriesId=1" in responses.calls[-1].request.url
+
+
+@responses.activate
+def test_episode_and_season_actions(client):
+    responses.put("http://nas:8989/api/v3/episode/monitor", json={})
+    client.post("/api/svc/sonarr/sonarr/item/1/action", json={"action": "episode_unmonitor", "arg": "77"}, headers=H)
+    assert json.loads(responses.calls[-1].request.body) == {"episodeIds": [77], "monitored": False}
+
+    responses.delete("http://nas:8989/api/v3/episodefile/900", json={})
+    r = client.post("/api/svc/sonarr/sonarr/item/1/action", json={"action": "episode_delete_file", "arg": "900"},
+                    headers=H)
+    assert r.status_code == 200
+
+    responses.get("http://nas:8989/api/v3/series/1", json=SERIES[0])
+    responses.put("http://nas:8989/api/v3/series/1", json={})
+    client.post("/api/svc/sonarr/sonarr/item/1/action", json={"action": "season_monitor", "arg": "0"}, headers=H)
+    seasons = json.loads(responses.calls[-1].request.body)["seasons"]
+    assert seasons[0] == {"seasonNumber": 0, "monitored": True}
+
+
+@responses.activate
+def test_seerr_movie_4k_and_folders(client):
+    responses.get("http://nas:5055/api/v1/service/radarr", json=[
+        {"id": 0, "name": "Radarr", "is4k": False, "isDefault": True, "activeDirectory": "/data/media/movies",
+         "activeProfileId": 1},
+        {"id": 1, "name": "Radarr 4K", "is4k": True, "isDefault": True, "activeDirectory": "/data/media/4k",
+         "activeProfileId": 7}])
+    responses.get("http://nas:5055/api/v1/service/radarr/0", json={"rootFolders": [{"path": "/data/media/movies"}]})
+    responses.get("http://nas:5055/api/v1/service/radarr/1", json={"rootFolders": [{"path": "/data/media/4k"}]})
+    responses.get("http://nas:5055/api/v1/movie/5", json={"id": 5, "title": "M", "mediaInfo": {"status": 5}})
+    d = client.get("/api/svc/seerr/seerr/item/movie-5", headers=H).get_json()
+    assert [a["id"] for a in d["actions"]] == ["request4k"]  # HD already available
+    assert d["actions"][0]["choose"]["options"][0]["value"] == "1|7|/data/media/4k"
+
+
+@responses.activate
+def test_home_cache_single_flight(client):
+    calls = []
+
+    def movies(req):
+        calls.append(1)
+        import time as _t
+        _t.sleep(0.3)
+        return 200, {}, json.dumps(MOVIES)
+
+    responses.add_callback(responses.GET, "http://nas:7878/api/v3/movie", callback=movies)
+    responses.get("http://nas:7878/api/v3/queue", json={"records": []})
+    responses.get("http://nas:7878/api/v3/calendar", json=[])
+    import threading as th
+    res = []
+    ts = [th.Thread(target=lambda: res.append(client.get("/api/svc/radarr/radarr/home", headers=H).status_code))
+          for _ in range(3)]
+    [t.start() for t in ts]
+    [t.join() for t in ts]
+    assert res == [200, 200, 200] and len(calls) == 1
+    client.get("/api/svc/radarr/radarr/home", headers=H)
+    assert len(calls) == 1  # served from cache
+
+
+@responses.activate
+def test_downloads(client):
+    gw.CFG["nzbget"] = {"url": "http://nas:6789", "username": "u", "password": "p"}
+    gw.CFG["qbittorrent"] = {"url": "http://nas:8080", "username": "u", "password": "p"}
+    # re-init with the extra clients, but keep the in-memory config
+    orig = gw.load_config
+    gw.load_config = lambda: gw.CFG
+    try:
+        gw.init()
+    finally:
+        gw.load_config = orig
+    rpc = []
+
+    def nzb(req):
+        b = json.loads(req.body)
+        rpc.append(b)
+        res = {"status": {"DownloadRate": 10_000_000, "DownloadPaused": False},
+               "listgroups": [{"NZBID": 7, "NZBName": "Show.S01E01", "Status": "DOWNLOADING",
+                               "FileSizeLo": 1000_000_000, "FileSizeHi": 0, "RemainingSizeLo": 400_000_000,
+                               "RemainingSizeHi": 0, "Category": "tv"},
+                              {"NZBID": 8, "NZBName": "Other", "Status": "QUEUED", "FileSizeLo": 10,
+                               "FileSizeHi": 0, "RemainingSizeLo": 10, "RemainingSizeHi": 0}],
+               "editqueue": True}.get(b["method"], True)
+        return 200, {}, json.dumps({"result": res})
+
+    responses.add_callback(responses.POST, "http://nas:6789/jsonrpc", callback=nzb)
+    responses.post("http://nas:8080/api/v2/auth/login", body="Ok.")
+    responses.get("http://nas:8080/api/v2/transfer/info", json={"dl_info_speed": 2_000_000})
+    responses.get("http://nas:8080/api/v2/torrents/info", json=[
+        {"hash": "abc", "name": "Linux.iso", "progress": 0.5, "size": 100, "amount_left": 50, "dlspeed": 2_000_000,
+         "eta": 25, "state": "downloading", "priority": 1},
+        {"hash": "def", "name": "Done", "progress": 1, "size": 5, "state": "uploading"},
+        {"hash": "ghi", "name": "Stopped", "progress": 0.1, "size": 5, "state": "stoppedDL", "eta": 8640000,
+         "priority": 2}])
+    d = client.get("/api/downloads", headers=H).get_json()
+    assert [c["id"] for c in d["clients"]] == ["nzbget", "qbittorrent"]
+    assert d["clients"][1]["seeding"] == 1 and d["clients"][0]["speed"] == 10_000_000
+    names = [i["name"] for i in d["items"]]
+    assert names[:2] == ["Show.S01E01", "Linux.iso"] and names[-1] == "Stopped"
+    nz = d["items"][0]
+    assert nz["progress"] == 0.6 and nz["eta"] == 40 and nz["status"] == "Downloading"
+    assert d["items"][-1]["paused"] is True and d["items"][-1]["eta"] == -1
+
+    client.post("/api/downloads/action", json={"client": "nzbget", "id": "7", "action": "top"}, headers=H)
+    assert rpc[-1] == {"method": "editqueue", "params": ["GroupMoveTop", "", [7]], "id": 1}
+    client.post("/api/downloads/action", json={"client": "nzbget", "action": "pause"}, headers=H)
+    assert rpc[-1]["method"] == "pausedownload"
+
+    # qBittorrent 4.x: /stop is 404 → falls back to /pause
+    responses.post("http://nas:8080/api/v2/torrents/stop", status=404)
+    responses.post("http://nas:8080/api/v2/torrents/pause", body="")
+    r = client.post("/api/downloads/action", json={"client": "qbittorrent", "id": "abc", "action": "pause"}, headers=H)
+    assert r.status_code == 200 and responses.calls[-1].request.url.endswith("/torrents/pause")
+    responses.post("http://nas:8080/api/v2/torrents/delete", body="")
+    client.post("/api/downloads/action", json={"client": "qbittorrent", "id": "abc", "action": "delete_files"},
+                headers=H)
+    assert "deleteFiles=true" in responses.calls[-1].request.body
+
+    # one client down → page still loads with an error for that client
+    responses.replace(responses.GET, "http://nas:8080/api/v2/transfer/info", status=500)
+    d = client.get("/api/downloads", headers=H).get_json()
+    assert d["clients"][1]["error"] and len(d["items"]) == 2
+    del gw.CFG["nzbget"], gw.CFG["qbittorrent"]
+
+
+def test_apk_and_log(client):
+    r = client.get("/apk")
+    assert r.status_code == 302 and r.headers["Location"].endswith("/releases/latest/download/Harbour.apk")
+    assert client.post("/api/log", json={"text": "boom"}).status_code == 401
+    assert client.post("/api/log", json={"text": "boom"}, headers=H).get_json() == {"ok": True}

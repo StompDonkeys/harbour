@@ -16,14 +16,18 @@ A Fire TV app for your Synology stack — Radarr, Sonarr, Seerr and File Station
 
 The stick only knows the gateway's address and one token. The gateway is a single-file Flask app; it's also where the Docker manager (phase 2) will live.
 
-## What's in v1
+## What's in it
 
 | Menu item | What you get |
 |---|---|
-| **Movies / Movies 4K** (one per Radarr) | Netflix-style home: focused title's fanart fills the top, rows for Downloading (with progress), Recently added, Coming soon, Missing, Top rated and your top genres. Detail page with quality, size, video/audio (TrueHD/Atmos/DV shown), Search now, Monitor, Remove, Delete + files. A–Z grid with filter. |
-| **TV Shows** | Same layout: Downloading, Airing this fortnight, Recently added, Returning soon, Missing episodes, genres. Detail page with season chips and episode list; search a whole show, a season or a single episode. |
-| **Discover** (Seerr) | Trending / Popular / Upcoming rows, TMDB search, Request, Request in 4K, request individual seasons. |
-| **Files** | Browse shared folders; ☰ Menu on any item for Move to…, Copy to…, Rename, Delete; New folder. Move/copy works by navigating to the destination and pressing *Move here*. |
+| **Radarr / Radarr 4K** (one per Radarr) | Netflix-style home: focused title's fanart fills the top, rows for Downloading, Recently added, Coming soon, Missing, Top rated and your top genres. Detail page with quality, size, video/audio, **Auto search**, **Manual search** (pick a release yourself), Monitor, Remove, Delete + files. A–Z grid with filter. |
+| **Sonarr** | Same layout. Detail page with season chips; per season: auto search, manual search, monitor. Press OK on an episode for its menu: auto search, manual search, monitor, delete file. |
+| **Jellyseerr** | Trending / Popular / Upcoming, search, Request (you pick the root folder), Request in 4K only when Seerr has a 4K server for that type, per-season requests. |
+| **Downloads** | NZBGet + qBittorrent live: speed, ETA, size, status, queue. OK on an item: pause/resume, move to top (NZBGet), delete, delete + files (qBittorrent). Pause/resume a whole client. |
+| **Files** | Browse shared folders; ☰ Menu on any item for Move to…, Copy to…, Rename, Delete; New folder. |
+| **Settings** | Gateway address + token, and **in-app updates** from GitHub releases. |
+
+Menu names come from the `name` of each service in `config.json`.
 
 **Remote:** D-pad moves, OK selects, Back goes up/back (and from a tab's first screen, jumps to the menu), ☰ opens options in Files.
 
@@ -40,7 +44,7 @@ The stick only knows the gateway's address and one token. The gateway is a singl
    The gateway container also runs as `1035:100`, so make sure `dockerlimited` can read the `harbour-gateway/config` folder.
 3. Copy the `gateway/` folder to `/volume1/docker/harbour-gateway/`.
 4. Create `/volume1/docker/harbour-gateway/config/config.json` from `config.example.json`:
-   - set `token` to a long random string (`openssl rand -hex 24` on your Mac),
+   - set `token` — anything you like; a 6–8 digit PIN is easy to type on the remote and fine on a home network,
    - fill in URLs and keys (fix the ports — I guessed `7879` for `radarr-truehd`),
    - `allowed_shares` limits what the TV can touch; delete the key to allow every share the user can see,
    - `four_k: true` shows *Request in 4K* (needs a 4K Radarr server set up in Seerr).
@@ -66,34 +70,23 @@ The stick only knows the gateway's address and one token. The gateway is a singl
 ## 2. Build the APK with GitHub Actions
 
 1. Create a GitHub repo (e.g. `harbour`) and push this whole folder to `main`.
-2. **Recommended — a fixed signing key** so new builds install over old ones. On your Mac:
-   ```bash
-   keytool -genkeypair -v -keystore harbour.jks -alias harbour \
-     -keyalg RSA -keysize 2048 -validity 10000
-   base64 -i harbour.jks | pbcopy
-   ```
-   Repo → Settings → Secrets and variables → Actions → add:
-   `HARBOUR_KEYSTORE_B64` (paste), `HARBOUR_KEYSTORE_PASSWORD`, `HARBOUR_KEY_ALIAS` (`harbour`), `HARBOUR_KEY_PASSWORD`.
-   Keep `harbour.jks` somewhere safe — don't commit it.
+2. **Signing key (needed for in-app updates).** Every build must be signed with the same key or Android refuses to update. Repo → Settings → Secrets and variables → Actions → **New repository secret**, add the two values from `harbour-signing-secrets.txt`:
+   `HARBOUR_KEYSTORE_B64` and `HARBOUR_KEYSTORE_PASSWORD`. Keep that file (it *is* the key) somewhere safe, not in the repo.
 3. Every push to `android/**` builds the APK, attaches it to the build run, and publishes a GitHub Release with `Harbour.apk`.
 
 Without the secrets the build still works but is debug-signed with a throwaway key — you'd have to uninstall before each update.
 
-## 3. Sideload onto the Fire TV Stick 4K Max
+## 3. Install on the Fire TV Stick 4K Max
 
-**Downloader app (easiest, public repo):**
+**First install** (once):
 1. Fire TV → Settings → My Fire TV → Developer options → *Install unknown apps* → turn on for **Downloader** (if Developer options is hidden: Settings → My Fire TV → About → click the device name 7 times).
-2. In Downloader, enter
-   `https://github.com/<you>/harbour/releases/latest/download/Harbour.apk`
-   (that link always points at the newest build).
+2. In Downloader, enter the short link served by your gateway: `192.168.4.68:8765/apk`
+   (it redirects to the newest `Harbour.apk` on GitHub).
+3. Open Harbour → enter `http://192.168.4.68:8765` and your token → **Test & save**.
 
-**ADB (private repo):** download the APK from the Actions run on your Mac, then enable *ADB debugging* on the stick and:
-```bash
-adb connect <fire-stick-ip>:5555
-adb install -r Harbour.apk
-```
+**Updates:** Harbour checks GitHub at launch. When a newer build exists you get a message and a dot on Settings; go to **Settings → Install**. The first time, Fire OS asks you to allow Harbour to install apps (Developer options → Install unknown apps → Harbour → On). Your settings are kept.
 
-First launch shows Settings: enter `http://192.168.4.68:8765` and the token, then **Test & save**.
+**Crashes:** if Harbour closes unexpectedly, the next launch sends the error to the gateway, so it appears in Container Manager → harbour-gateway → Log as `APP REPORT`.
 
 ## Developing
 

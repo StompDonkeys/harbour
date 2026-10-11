@@ -1,19 +1,26 @@
 {
   "name": "Harbour",
-  "token": "change-me-to-a-long-random-string",
+  "token": "482913",
 
   "radarr": [
-    { "id": "radarr",        "name": "Movies",    "url": "http://192.168.4.68:7878", "api_key": "RADARR_API_KEY" },
-    { "id": "radarr-truehd", "name": "Movies 4K", "url": "http://192.168.4.68:7879", "api_key": "RADARR_4K_API_KEY", "icon": "4k" }
+    { "id": "radarr",        "name": "Radarr",    "url": "http://192.168.4.68:7878", "api_key": "RADARR_API_KEY" },
+    { "id": "radarr-truehd", "name": "Radarr 4K", "url": "http://192.168.4.68:7879", "api_key": "RADARR_4K_API_KEY", "icon": "4k" }
   ],
 
   "sonarr": [
-    { "id": "sonarr", "name": "TV Shows", "url": "http://192.168.4.68:8989", "api_key": "SONARR_API_KEY" }
+    { "id": "sonarr", "name": "Sonarr", "url": "http://192.168.4.68:8989", "api_key": "SONARR_API_KEY" }
   ],
 
   "seerr": {
-    "id": "seerr", "name": "Discover", "url": "http://192.168.4.68:5055", "api_key": "SEERR_API_KEY",
-    "four_k": true
+    "id": "seerr", "name": "Jellyseerr", "url": "http://192.168.4.68:5055", "api_key": "SEERR_API_KEY"
+  },
+
+  "nzbget": {
+    "name": "NZBGet", "url": "http://192.168.4.68:6789", "username": "nzbget", "password": "NZBGET_PASSWORD"
+  },
+
+  "qbittorrent": {
+    "name": "qBittorrent", "url": "http://192.168.4.68:8080", "username": "admin", "password": "QBIT_PASSWORD"
   },
 
   "filestation": {

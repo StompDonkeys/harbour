@@ -24,8 +24,9 @@ android {
             if (keystorePath != null) {
                 storeFile = file(keystorePath)
                 storePassword = System.getenv("HARBOUR_KEYSTORE_PASSWORD")
-                keyAlias = System.getenv("HARBOUR_KEY_ALIAS")
-                keyPassword = System.getenv("HARBOUR_KEY_PASSWORD")
+                keyAlias = System.getenv("HARBOUR_KEY_ALIAS")?.takeIf { it.isNotBlank() } ?: "harbour"
+                keyPassword = System.getenv("HARBOUR_KEY_PASSWORD")?.takeIf { it.isNotBlank() }
+                    ?: System.getenv("HARBOUR_KEYSTORE_PASSWORD")
             }
         }
     }

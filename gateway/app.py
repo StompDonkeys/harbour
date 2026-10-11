@@ -3,8 +3,9 @@
 Harbour gateway — a small API that sits on the Synology next to your *arr stack.
 
 The Fire TV app talks only to this gateway. The gateway holds every API key and
-password, talks to Radarr / Sonarr / Seerr / File Station, and hands back simple,
-TV-ready JSON (rows of cards, detail pages, file listings).
+password, talks to Radarr / Sonarr / Seerr / File Station / NZBGet / qBittorrent,
+and hands back simple, TV-ready JSON (rows of cards, detail pages, file listings,
+download queues).
 
 Config: /config/config.json (see config.example.json). Override with HARBOUR_CONFIG.
 """
@@ -17,13 +18,14 @@ import random
 import threading
 import time
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from urllib.parse import quote, urlsplit
 
 import requests
 from flask import Flask, Response, jsonify, request
 
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 CONFIG_PATH = os.environ.get("HARBOUR_CONFIG", "/config/config.json")
 TMDB_IMG = "https://image.tmdb.org/t/p/"
 
@@ -36,6 +38,9 @@ app.json.sort_keys = False
 CFG = {}
 SERVICES = {}  # (kind, inst) -> service object, in config order
 FILES = None
+CLIENTS = {}   # download clients by id
+POOL = ThreadPoolExecutor(max_workers=16)
+DEFAULT_REPO = "StompDonkeys/harbour"
 
 
 class ApiError(Exception):
@@ -108,8 +113,11 @@ def row(title, items, style="poster"):
     return {"title": title, "style": style, "items": items}
 
 
-def action(id_, label, style=None, confirm=None, arg=None):
-    return clean({"id": id_, "label": label, "style": style, "confirm": confirm, "arg": arg})
+def action(id_, label, style=None, confirm=None, arg=None, opens=None, choose=None):
+    """A button on a detail page. `opens` makes the app open a screen (e.g. "releases") instead
+    of calling the gateway; `choose` makes it ask the user to pick one option first."""
+    return clean({"id": id_, "label": label, "style": style, "confirm": confirm, "arg": arg,
+                  "opens": opens, "choose": choose})
 
 
 def facts(*pairs):
@@ -136,9 +144,80 @@ def safe_row(fn, label):
         return []
 
 
+
+# ---------------------------------------------------------------- caching
+
+class HomeCache:
+    """
+    Serve a service's home page from memory. A fresh copy (< FRESH s) is returned as-is;
+    an older one is returned immediately while a background thread refreshes it; only a
+    cold cache makes the TV wait — and concurrent cold requests share one computation.
+    """
+    FRESH = 45
+    MAX_AGE = 1800
+
+    def _hc_init(self):
+        self._home = None
+        self._home_lock = threading.Lock()
+        self._refreshing = False
+
+    def home_cached(self):
+        h, now = self._home, time.time()
+        if h and now - h[0] < self.FRESH:
+            return h[1]
+        if h and now - h[0] < self.MAX_AGE:
+            if not self._refreshing:
+                self._refreshing = True
+                threading.Thread(target=self.refresh_home, daemon=True).start()
+            return h[1]
+        with self._home_lock:
+            h = self._home
+            if h and time.time() - h[0] < self.FRESH:
+                return h[1]
+            val = self.home()
+            self._home = (time.time(), val)
+            return val
+
+    def refresh_home(self):
+        try:
+            with self._home_lock:
+                val = self.home()
+                self._home = (time.time(), val)
+        except Exception as e:
+            log.warning("background refresh of %s failed: %s", getattr(self, "name", "?"), e)
+        finally:
+            self._refreshing = False
+
+    def drop_home(self):
+        self._home = None
+
+
+def par(**fns):
+    """Run zero-argument callables concurrently; returns {name: result}."""
+    futs = {k: POOL.submit(f) for k, f in fns.items()}
+    return {k: f.result() for k, f in futs.items()}
+
+
+def safe(fn, label, default):
+    try:
+        return fn()
+    except Exception as e:
+        log.warning("%s failed: %s", label, e)
+        return default
+
+
+def fmt_age(r):
+    days, hours = r.get("age"), r.get("ageHours")
+    if days and days >= 1:
+        return f"{int(days)}d"
+    if hours is not None:
+        return f"{int(hours)}h" if hours >= 1 else f"{int(hours * 60)}m"
+    return None
+
+
 # ---------------------------------------------------------------- *arr base
 
-class Arr:
+class Arr(HomeCache):
     kind = ""
     default_icon = ""
 
@@ -150,6 +229,7 @@ class Arr:
         self.key = conf["api_key"]
         self._cache = {}
         self._lock = threading.Lock()
+        self._hc_init()
 
     def _req(self, method, path, **kw):
         kw.setdefault("timeout", 30)
@@ -196,6 +276,7 @@ class Arr:
     def invalidate(self):
         with self._lock:
             self._cache.clear()
+        self.drop_home()
 
     def image(self, images, cover, size):
         for im in images or []:
@@ -210,6 +291,38 @@ class Arr:
     def info(self):
         return {"kind": self.kind, "inst": self.inst, "name": self.name, "icon": self.icon}
 
+    # -- interactive ("manual") search, shared by Radarr and Sonarr
+    def release_list(self, params):
+        rels = self._req("GET", "/release", params=params, timeout=180)
+        out = []
+        for r in rels or []:
+            rej = [x if isinstance(x, str) else (x.get("reason") or x.get("message") or str(x))
+                   for x in r.get("rejections") or []]
+            torrent = r.get("protocol") == "torrent"
+            out.append(clean({
+                "guid": r.get("guid"),
+                "indexerId": int(r.get("indexerId") or 0),
+                "title": r.get("title") or "?",
+                "quality": ((r.get("quality") or {}).get("quality") or {}).get("name"),
+                "size": int(r.get("size") or 0),
+                "indexer": r.get("indexer"),
+                "age": fmt_age(r),
+                "peers": f"{r.get('seeders') or 0} seeders" if torrent else None,
+                "protocol": "Torrent" if torrent else "Usenet",
+                "approved": bool(r.get("approved")),
+                "rejections": rej,
+                "score": r.get("customFormatScore"),
+            }))
+        out.sort(key=lambda x: (not x["approved"], -(x.get("score") or 0), -x["size"]))
+        return {"items": out}
+
+    def grab(self, guid, indexer_id):
+        if not guid:
+            raise ApiError("Missing release")
+        self._req("POST", "/release", json={"guid": guid, "indexerId": int(indexer_id or 0)}, timeout=60)
+        self.invalidate()
+        return {"message": "Sent to download client ✓"}
+
 
 # ---------------------------------------------------------------- Radarr
 
@@ -218,7 +331,7 @@ class Radarr(Arr):
     default_icon = "movie"
 
     def movies(self):
-        return self.cached("movies", 30, lambda: self.get("/movie"))
+        return self.cached("movies", 60, lambda: self.get("/movie"))
 
     @staticmethod
     def quality(m):
@@ -261,56 +374,58 @@ class Radarr(Arr):
         })
 
     def home(self):
-        movies = self.movies()
-        by_id = {m["id"]: m for m in movies}
         today = datetime.now(timezone.utc).date()
+        d = par(
+            movies=self.movies,
+            queue=lambda: safe(lambda: self.get("/queue", page=1, pageSize=100, includeMovie="true")
+                               .get("records", []), "radarr queue", []),
+            cal=lambda: safe(lambda: self.get("/calendar", start=today.isoformat(),
+                                              end=(today + timedelta(days=120)).isoformat(),
+                                              unmonitored="false"), "radarr calendar", []),
+        )
+        movies = d["movies"]
+        by_id = {m["id"]: m for m in movies}
         rows = []
 
-        def downloading():
-            recs = self.get("/queue", page=1, pageSize=100, includeMovie="true").get("records", [])
-            out = []
-            for r in recs:
-                m = r.get("movie") or by_id.get(r.get("movieId"))
-                if not m:
-                    continue
-                size, left = r.get("size") or 0, r.get("sizeleft") or 0
-                prog = max(0.0, min(1.0, 1 - left / size)) if size else 0.0
-                state = (r.get("trackedDownloadState") or "").lower()
-                status = (r.get("status") or "").lower()
-                if state in ("importpending", "importing"):
-                    badge = "Importing"
-                elif status == "downloading":
-                    badge = f"{prog * 100:.0f}%"
-                else:
-                    badge = status.title() or "Queued"
-                tone = "warn" if (r.get("trackedDownloadStatus") or "").lower() in ("warning", "error") else "info"
-                sub = join(f"{prog * 100:.0f}%", f"{r['timeleft']} left" if r.get("timeleft") else None,
-                           r.get("quality", {}).get("quality", {}).get("name"))
-                out.append(self.card(m, badge, tone, round(prog, 3), sub))
-            return dedupe(out)
+        dl = []
+        for r in d["queue"]:
+            m = r.get("movie") or by_id.get(r.get("movieId"))
+            if not m:
+                continue
+            size, left = r.get("size") or 0, r.get("sizeleft") or 0
+            prog = max(0.0, min(1.0, 1 - left / size)) if size else 0.0
+            state = (r.get("trackedDownloadState") or "").lower()
+            status = (r.get("status") or "").lower()
+            if state in ("importpending", "importing"):
+                badge = "Importing"
+            elif status == "downloading":
+                badge = f"{prog * 100:.0f}%"
+            else:
+                badge = status.title() or "Queued"
+            tone = "warn" if (r.get("trackedDownloadStatus") or "").lower() in ("warning", "error") else "info"
+            sub = join(f"{prog * 100:.0f}%", f"{r['timeleft']} left" if r.get("timeleft") else None,
+                       ((r.get("quality") or {}).get("quality") or {}).get("name"))
+            dl.append(self.card(m, badge, tone, round(prog, 3), sub))
 
-        def coming_soon():
-            cal = self.get("/calendar", start=today.isoformat(),
-                           end=(today + timedelta(days=120)).isoformat(), unmonitored="false")
-            labelled = []
-            for m in cal:
-                if m.get("hasFile"):
-                    continue
-                opts = [(m.get(k), lbl) for k, lbl in
-                        (("digitalRelease", "Digital"), ("physicalRelease", "Disc"), ("inCinemas", "Cinemas"))]
-                opts = sorted((d, lbl) for d, lbl in opts if d and d[:10] >= today.isoformat())
-                if opts:
-                    labelled.append((opts[0][0], opts[0][1], m))
-            labelled.sort(key=lambda x: x[0])
-            return dedupe([self.card(m, subtitle=join(lbl, fmt_date(d))) for d, lbl, m in labelled])
+        labelled = []
+        for m in d["cal"]:
+            if m.get("hasFile"):
+                continue
+            opts = [(m.get(k), lbl) for k, lbl in
+                    (("digitalRelease", "Digital"), ("physicalRelease", "Disc"), ("inCinemas", "Cinemas"))]
+            opts = sorted((dt, lbl) for dt, lbl in opts if dt and dt[:10] >= today.isoformat())
+            if opts:
+                labelled.append((opts[0][0], opts[0][1], m))
+        labelled.sort(key=lambda x: x[0])
 
         have = [m for m in movies if m.get("hasFile")]
         added_key = lambda m: (m.get("movieFile") or {}).get("dateAdded") or m.get("added") or ""
         recent = sorted(have, key=added_key, reverse=True)
 
-        rows.append(row("Downloading", safe_row(downloading, "downloading"), "landscape"))
+        rows.append(row("Downloading", dedupe(dl), "landscape"))
         rows.append(row("Recently added", [self.card(m) for m in recent[:30]]))
-        rows.append(row("Coming soon", safe_row(coming_soon, "coming soon")))
+        rows.append(row("Coming soon", dedupe([self.card(m, subtitle=join(lbl, fmt_date(dt)))
+                                               for dt, lbl, m in labelled])))
         missing = [m for m in movies if m.get("monitored") and not m.get("hasFile") and m.get("isAvailable")]
         missing.sort(key=lambda m: m.get("added") or "", reverse=True)
         rows.append(row("Missing", [self.card(m) for m in missing[:30]]))
@@ -323,8 +438,7 @@ class Radarr(Arr):
             rows.append(row(g, [self.card(m) for m in pool[:30]]))
 
         rows = [r for r in rows if r["items"]]
-        cands = [self.card(m) for m in recent[:12]]
-        cands = [c for c in cands if c.get("backdrop")]
+        cands = [c for c in (self.card(m) for m in recent[:12]) if c.get("backdrop")]
         hero = random.Random(int(time.time() // 3600)).choice(cands) if cands else None
         return {"hero": hero, "rows": rows}
 
@@ -358,7 +472,8 @@ class Radarr(Arr):
             ("Path", m.get("path")),
         )
         acts = [
-            action("search", "Search now", "primary"),
+            action("search", "Auto search", "primary"),
+            action("releases", "Manual search", opens="releases", arg="movie"),
             action("unmonitor", "Unmonitor") if m.get("monitored") else action("monitor", "Monitor"),
             action("delete", "Remove", confirm=f"Remove “{m.get('title')}” from {self.name}? Files stay on the NAS."),
             action("delete_files", "Delete + files", "danger",
@@ -366,7 +481,10 @@ class Radarr(Arr):
         ]
         return {"item": self.card(m), "facts": f, "actions": acts}
 
-    def act(self, item_id, act, arg=None):
+    def releases(self, item_id, arg=None):
+        return self.release_list({"movieId": int(item_id)})
+
+    def act(self, item_id, act, arg=None, choice=None):
         mid = int(item_id)
         if act == "search":
             self.command({"name": "MoviesSearch", "movieIds": [mid]})
@@ -392,7 +510,7 @@ class Sonarr(Arr):
     default_icon = "tv"
 
     def series(self):
-        return self.cached("series", 30, lambda: self.get("/series"))
+        return self.cached("series", 60, lambda: self.get("/series"))
 
     def card(self, s, badge=None, tone=None, progress=None, subtitle=None, key=None):
         st = s.get("statistics") or {}
@@ -426,68 +544,62 @@ class Sonarr(Arr):
         return f"S{e.get('seasonNumber', 0):02d}E{e.get('episodeNumber', 0):02d}"
 
     def home(self):
-        series = self.series()
-        by_id = {s["id"]: s for s in series}
         today = datetime.now(timezone.utc).date()
+        d = par(
+            series=self.series,
+            queue=lambda: safe(lambda: self.get("/queue", page=1, pageSize=100, includeSeries="true",
+                                                includeEpisode="true").get("records", []), "sonarr queue", []),
+            cal=lambda: safe(lambda: self.get("/calendar", start=today.isoformat(),
+                                              end=(today + timedelta(days=14)).isoformat(),
+                                              includeSeries="true"), "sonarr calendar", []),
+            missing=lambda: safe(lambda: self.get("/wanted/missing", page=1, pageSize=100)
+                                 .get("records", []), "sonarr missing", []),
+        )
+        series = d["series"]
+        by_id = {s["id"]: s for s in series}
         rows = []
 
-        def downloading():
-            recs = self.get("/queue", page=1, pageSize=100, includeSeries="true",
-                            includeEpisode="true").get("records", [])
-            out = []
-            for r in recs:
-                s = r.get("series") or by_id.get(r.get("seriesId"))
-                if not s:
-                    continue
-                e = r.get("episode") or {}
-                size, left = r.get("size") or 0, r.get("sizeleft") or 0
-                prog = max(0.0, min(1.0, 1 - left / size)) if size else 0.0
-                state = (r.get("trackedDownloadState") or "").lower()
-                badge = "Importing" if state in ("importpending", "importing") else f"{prog * 100:.0f}%"
-                sub = join(self.sxe(e) if e else None, e.get("title"),
-                           f"{r['timeleft']} left" if r.get("timeleft") else None)
-                out.append(self.card(s, badge, "info", round(prog, 3), sub, key=f"sonarr:{self.inst}:q{r.get('id')}"))
-            return dedupe(out)
+        dl = []
+        for r in d["queue"]:
+            s = r.get("series") or by_id.get(r.get("seriesId"))
+            if not s:
+                continue
+            e = r.get("episode") or {}
+            size, left = r.get("size") or 0, r.get("sizeleft") or 0
+            prog = max(0.0, min(1.0, 1 - left / size)) if size else 0.0
+            state = (r.get("trackedDownloadState") or "").lower()
+            badge = "Importing" if state in ("importpending", "importing") else f"{prog * 100:.0f}%"
+            sub = join(self.sxe(e) if e else None, e.get("title"),
+                       f"{r['timeleft']} left" if r.get("timeleft") else None)
+            dl.append(self.card(s, badge, "info", round(prog, 3), sub, key=f"sonarr:{self.inst}:q{r.get('id')}"))
 
-        def airing():
-            eps = self.get("/calendar", start=today.isoformat(),
-                           end=(today + timedelta(days=14)).isoformat(), includeSeries="true")
-            eps.sort(key=lambda e: e.get("airDateUtc") or "")
-            out = []
-            for e in eps:
-                s = e.get("series") or by_id.get(e.get("seriesId"))
-                if not s:
-                    continue
-                out.append(self.card(s, badge=fmt_date(e.get("airDateUtc")), tone="info",
-                                     subtitle=join(self.sxe(e), e.get("title")),
-                                     key=f"sonarr:{self.inst}:e{e.get('id')}"))
-            return dedupe(out)
+        eps = sorted(d["cal"], key=lambda e: e.get("airDateUtc") or "")
+        airing = []
+        for e in eps:
+            s = e.get("series") or by_id.get(e.get("seriesId"))
+            if s:
+                airing.append(self.card(s, badge=fmt_date(e.get("airDateUtc")), tone="info",
+                                        subtitle=join(self.sxe(e), e.get("title")),
+                                        key=f"sonarr:{self.inst}:e{e.get('id')}"))
 
-        def missing():
-            recs = self.get("/wanted/missing", page=1, pageSize=100, includeSeries="true").get("records", [])
-            counts, order = Counter(), []
-            for e in recs:
-                sid = e.get("seriesId")
-                if sid not in counts:
-                    order.append(sid)
-                counts[sid] += 1
-            out = []
-            for sid in order:
-                s = by_id.get(sid)
-                if s:
-                    n = counts[sid]
-                    out.append(self.card(s, badge=f"{n} missing", tone="warn"))
-            return dedupe(out)
+        counts, order = Counter(), []
+        for e in d["missing"]:
+            sid = e.get("seriesId")
+            if sid not in counts:
+                order.append(sid)
+            counts[sid] += 1
+        missing = [self.card(by_id[sid], badge=f"{counts[sid]} missing", tone="warn")
+                   for sid in order if sid in by_id]
 
-        rows.append(row("Downloading", safe_row(downloading, "downloading"), "landscape"))
-        rows.append(row("Airing this fortnight", safe_row(airing, "airing"), "landscape"))
+        rows.append(row("Downloading", dedupe(dl), "landscape"))
+        rows.append(row("Airing this fortnight", dedupe(airing), "landscape"))
         recent = sorted(series, key=lambda s: s.get("added") or "", reverse=True)
         rows.append(row("Recently added", [self.card(s) for s in recent[:30]]))
         returning = [s for s in series if s.get("status") == "continuing" and s.get("nextAiring")]
         returning.sort(key=lambda s: s.get("nextAiring"))
         rows.append(row("Returning soon", [self.card(s, badge=fmt_date(s.get("nextAiring")), tone="info")
                                            for s in returning[:30]]))
-        rows.append(row("Missing episodes", safe_row(missing, "missing")))
+        rows.append(row("Missing episodes", dedupe(missing)))
         genres = Counter(g for s in series for g in (s.get("genres") or []))
         for g, _ in genres.most_common(6):
             pool = [s for s in series if g in (s.get("genres") or [])]
@@ -507,8 +619,8 @@ class Sonarr(Arr):
 
     def detail(self, item_id):
         sid = int(item_id)
-        s = self.get(f"/series/{sid}")
-        eps = self.get("/episode", seriesId=sid)
+        d = par(series=lambda: self.get(f"/series/{sid}"), eps=lambda: self.get("/episode", seriesId=sid))
+        s, eps = d["series"], d["eps"]
         st = s.get("statistics") or {}
         now = datetime.now(timezone.utc)
         f = facts(
@@ -536,19 +648,37 @@ class Sonarr(Arr):
                 aired = parse_dt(e.get("airDateUtc"))
                 state = ("Downloaded" if e.get("hasFile") else
                          "Missing" if aired and aired <= now else "Not aired")
+                eid = str(e["id"])
+                label = f"{self.sxe(e)} “{e.get('title') or 'TBA'}”"
+                ep_acts = [
+                    action("episode_search", "Auto search", "primary", arg=eid),
+                    action("releases", "Manual search", opens="releases", arg=f"episode:{eid}"),
+                    action("episode_unmonitor", "Unmonitor", arg=eid) if e.get("monitored")
+                    else action("episode_monitor", "Monitor", arg=eid),
+                ]
+                if e.get("hasFile") and e.get("episodeFileId"):
+                    ep_acts.append(action("episode_delete_file", "Delete file", "danger",
+                                          confirm=f"Delete the file for {label}? This can't be undone.",
+                                          arg=str(e["episodeFileId"])))
                 episodes.append(clean({
-                    "id": str(e["id"]),
+                    "id": eid,
                     "label": f"E{e.get('episodeNumber', 0):02d}",
                     "title": e.get("title") or "TBA",
-                    "subtitle": join(fmt_date(e.get("airDateUtc"), True) or "TBA", state),
+                    "subtitle": join(fmt_date(e.get("airDateUtc"), True) or "TBA", state,
+                                     None if e.get("monitored") else "unmonitored"),
                     "hasFile": bool(e.get("hasFile")),
-                    "action": action("episode_search", "Search episode", arg=str(e["id"])),
+                    "actions": ep_acts,
                 }))
             seasons.append(clean({
                 "number": n,
                 "label": "Specials" if n == 0 else f"Season {n}",
                 "subtitle": join(f"{have}/{len(seps)} episodes", None if sn.get("monitored") else "unmonitored"),
-                "action": action("season_search", "Search season", arg=str(n)),
+                "actions": [
+                    action("season_search", "Auto search season", "primary", arg=str(n)),
+                    action("releases", "Manual search", opens="releases", arg=f"season:{n}"),
+                    action("season_unmonitor", "Unmonitor season", arg=str(n)) if sn.get("monitored")
+                    else action("season_monitor", "Monitor season", arg=str(n)),
+                ],
                 "episodes": episodes,
             }))
         acts = [
@@ -560,7 +690,15 @@ class Sonarr(Arr):
         ]
         return {"item": self.card(s), "facts": f, "actions": acts, "seasons": seasons}
 
-    def act(self, item_id, act, arg=None):
+    def releases(self, item_id, arg=None):
+        kind, _, val = (arg or "").partition(":")
+        if kind == "season" and val.lstrip("-").isdigit():
+            return self.release_list({"seriesId": int(item_id), "seasonNumber": int(val)})
+        if kind == "episode" and val.isdigit():
+            return self.release_list({"episodeId": int(val)})
+        raise ApiError("Pick a season or an episode to search")
+
+    def act(self, item_id, act, arg=None, choice=None):
         sid = int(item_id)
         if act == "search":
             self.command({"name": "SeriesSearch", "seriesId": sid})
@@ -571,6 +709,19 @@ class Sonarr(Arr):
         elif act == "episode_search":
             self.command({"name": "EpisodeSearch", "episodeIds": [int(arg)]})
             return {"message": "Searching for episode…", "refresh": False}
+        elif act in ("episode_monitor", "episode_unmonitor"):
+            self.put("/episode/monitor", {"episodeIds": [int(arg)], "monitored": act == "episode_monitor"})
+            msg = "Episode monitored" if act == "episode_monitor" else "Episode unmonitored"
+        elif act == "episode_delete_file":
+            self.delete(f"/episodefile/{int(arg)}")
+            msg = "Episode file deleted"
+        elif act in ("season_monitor", "season_unmonitor"):
+            s = self.get(f"/series/{sid}")
+            for x in s.get("seasons") or []:
+                if x.get("seasonNumber") == int(arg):
+                    x["monitored"] = act == "season_monitor"
+            self.put(f"/series/{sid}", s)
+            msg = f"Season {arg} " + ("monitored" if act == "season_monitor" else "unmonitored")
         elif act in ("monitor", "unmonitor"):
             s = self.get(f"/series/{sid}")
             s["monitored"] = act == "monitor"
@@ -594,8 +745,9 @@ SEERR_STATUS = {2: ("Pending", "info"), 3: ("Requested", "info"),
 REQUESTED = (2, 3, 5)
 
 
-class Seerr:
+class Seerr(HomeCache):
     kind = "seerr"
+    FRESH = 300  # discovery lists barely change
 
     def __init__(self, conf):
         self.inst = conf.get("id", "seerr")
@@ -603,7 +755,11 @@ class Seerr:
         self.icon = conf.get("icon", "discover")
         self.url = conf["url"].rstrip("/")
         self.key = conf["api_key"]
-        self.four_k = bool(conf.get("four_k", False))
+        # 4K options appear only when Seerr has a 4K server for that media type.
+        # "four_k": false in config hides them entirely.
+        self.four_k = conf.get("four_k", True) is not False
+        self._cache = {}
+        self._hc_init()
 
     def info(self):
         return {"kind": self.kind, "inst": self.inst, "name": self.name, "icon": self.icon}
@@ -619,6 +775,50 @@ class Seerr:
                 msg = r.text[:200]
             raise ApiError(f"{self.name}: {msg}", 502)
         return r.json() if r.content else {}
+
+    def cached(self, key, ttl, fn):
+        hit = self._cache.get(key)
+        if hit and time.time() - hit[0] < ttl:
+            return hit[1]
+        val = fn()
+        self._cache[key] = (time.time(), val)
+        return val
+
+    def invalidate(self):
+        self._cache.clear()
+        self.drop_home()
+
+    # -- Radarr/Sonarr servers configured inside Seerr (for 4K + root folders)
+    def servers(self, kind):
+        return safe(lambda: self.cached(f"srv-{kind}", 300, lambda: self._req("GET", f"/service/{kind}")),
+                    f"seerr {kind} servers", []) or []
+
+    def has_4k(self, mt):
+        kind = "radarr" if mt == "movie" else "sonarr"
+        return self.four_k and any(s.get("is4k") for s in self.servers(kind))
+
+    def folder_choice(self, mt, is4k):
+        kind = "radarr" if mt == "movie" else "sonarr"
+        srvs = [s for s in self.servers(kind) if bool(s.get("is4k")) == is4k]
+        if not srvs:
+            return None
+        srv = next((s for s in srvs if s.get("isDefault")), srvs[0])
+        det = safe(lambda: self.cached(f"srvd-{kind}-{srv['id']}", 300,
+                                       lambda: self._req("GET", f"/service/{kind}/{srv['id']}")),
+                   f"seerr {kind} server detail", {}) or {}
+        default = srv.get("activeDirectory")
+        folders = sorted(det.get("rootFolders") or [], key=lambda f: (f.get("path") != default, f.get("path") or ""))
+        opts = []
+        for rf in folders:
+            path = rf.get("path")
+            if not path:
+                continue
+            label = path + (f"  ·  {fmt_size(rf['freeSpace'])} free" if rf.get("freeSpace") else "") \
+                + ("  (default)" if path == default else "")
+            opts.append({"label": label, "value": f"{srv['id']}|{srv.get('activeProfileId') or ''}|{path}"})
+        if not opts:
+            return None
+        return {"title": f"Save to which folder? — {srv.get('name') or kind.title()}", "options": opts}
 
     def card(self, r, mt=None):
         mt = mt or r.get("mediaType")
@@ -649,10 +849,12 @@ class Seerr:
                    ("Popular TV", "/discover/tv", "tv"),
                    ("Upcoming movies", "/discover/movies/upcoming", "movie"),
                    ("Upcoming TV", "/discover/tv/upcoming", "tv")]
-        rows = []
-        for title, path, mt in sources:
-            items = safe_row(lambda: self.cards(self._req("GET", path, {"page": 1}).get("results"), mt), title)
-            rows.append(row(title, items))
+
+        def fetch(path, mt, title):
+            return lambda: safe(lambda: self.cards(self._req("GET", path, {"page": 1}).get("results"), mt), title, [])
+
+        got = par(**{f"r{i}": fetch(p, mt, t) for i, (t, p, mt) in enumerate(sources)})
+        rows = [row(t, got[f"r{i}"]) for i, (t, _, _) in enumerate(sources)]
         rows = [r for r in rows if r["items"]]
         hero = next((i for r in rows for i in r["items"] if i.get("backdrop")), None)
         return {"hero": hero, "rows": rows}
@@ -691,11 +893,13 @@ class Seerr:
                       ("Seasons", d.get("numberOfSeasons")),
                       ("Rating", f"{d['voteAverage']:.1f}" if d.get("voteAverage") else None),
                       ("Genres", genres), ("Network", network), ("Status", d.get("status")))
+        choose = self.folder_choice(mt, False)
         acts = []
         if st not in REQUESTED:
-            acts.append(action("request", "Request" if mt == "movie" else "Request all seasons", "primary"))
-        if self.four_k and st4k not in REQUESTED:
-            acts.append(action("request4k", "Request in 4K"))
+            acts.append(action("request", "Request" if mt == "movie" else "Request all seasons", "primary",
+                               choose=choose))
+        if self.has_4k(mt) and st4k not in REQUESTED:
+            acts.append(action("request4k", "Request in 4K", choose=self.folder_choice(mt, True)))
         seasons = []
         if mt == "tv":
             sstat = {x.get("seasonNumber"): x.get("status") for x in mi.get("seasons") or []}
@@ -709,11 +913,12 @@ class Seerr:
                     "label": s.get("name") or f"Season {n}",
                     "subtitle": join(f"{s.get('episodeCount', 0)} episodes",
                                      SEERR_STATUS.get(ss, ("Not requested",))[0]),
-                    "action": None if ss in REQUESTED else action("request_season", f"Request season {n}", arg=str(n)),
+                    "actions": [] if ss in REQUESTED else
+                    [action("request_season", f"Request season {n}", "primary", arg=str(n), choose=choose)],
                 }))
         return {"item": self.card(d, mt), "facts": f, "actions": acts, "seasons": seasons}
 
-    def act(self, item_id, act, arg=None):
+    def act(self, item_id, act, arg=None, choice=None):
         mt, tid = self._split(item_id)
         body = {"mediaType": mt, "mediaId": tid, "is4k": act == "request4k"}
         if act in ("request", "request4k"):
@@ -724,7 +929,16 @@ class Seerr:
             body.update(mediaType="tv", seasons=[int(arg)])
         else:
             raise ApiError(f"Unknown action {act}")
+        if choice:
+            srv, prof, path = (str(choice).split("|", 2) + ["", "", ""])[:3]
+            if srv.isdigit():
+                body["serverId"] = int(srv)
+            if prof.isdigit():
+                body["profileId"] = int(prof)
+            if path:
+                body["rootFolder"] = path
         self._req("POST", "/request", body=body)
+        self.drop_home()
         return {"message": "Requested ✓", "refresh": True}
 
 
@@ -879,12 +1093,199 @@ class FileStation:
         raise ApiError(f"Unknown file operation {op}")
 
 
+
+
+# ---------------------------------------------------------------- download clients
+
+def _status_label(s):
+    labels = {"PP_QUEUED": "Waiting to process", "LOADING_PARS": "Loading pars",
+              "VERIFYING_SOURCES": "Verifying", "VERIFYING_REPAIRED": "Verifying",
+              "FETCHING": "Fetching NZB", "PP_FINISHED": "Finishing"}
+    return labels.get(s) or s.replace("_", " ").title()
+
+
+def _sort_rank(it):
+    if it["speed"] > 0 or it["status"] == "Downloading":
+        return 0
+    return 2 if it["paused"] else 1
+
+
+class NzbGet:
+    kind = "nzbget"
+
+    def __init__(self, conf):
+        self.id = conf.get("id", "nzbget")
+        self.name = conf.get("name", "NZBGet")
+        self.url = conf["url"].rstrip("/")
+        self.auth = (conf.get("username") or "", conf.get("password") or "")
+
+    def rpc(self, method, *params):
+        r = requests.post(f"{self.url}/jsonrpc", json={"method": method, "params": list(params), "id": 1},
+                          auth=self.auth, timeout=15)
+        if r.status_code == 401:
+            raise ApiError(f"{self.name}: wrong username or password", 502)
+        if r.status_code >= 400:
+            raise ApiError(f"{self.name}: HTTP {r.status_code}", 502)
+        j = r.json()
+        if j.get("error"):
+            raise ApiError(f"{self.name}: {(j['error'] or {}).get('message', 'error')}", 502)
+        return j.get("result")
+
+    def snapshot(self):
+        d = par(st=lambda: self.rpc("status"), groups=lambda: self.rpc("listgroups", 0))
+        st, groups = d["st"] or {}, d["groups"] or []
+        rate = int(st.get("DownloadRate") or 0)
+        items = []
+        for g in groups:
+            size = ((g.get("FileSizeHi") or 0) << 32) + (g.get("FileSizeLo") or 0) or int((g.get("FileSizeMB") or 0) * 1048576)
+            left = ((g.get("RemainingSizeHi") or 0) << 32) + (g.get("RemainingSizeLo") or 0) \
+                or int((g.get("RemainingSizeMB") or 0) * 1048576)
+            status = g.get("Status") or ""
+            active = status == "DOWNLOADING"
+            speed = rate if active else 0
+            items.append({
+                "client": self.id, "clientName": self.name, "id": str(g.get("NZBID")),
+                "name": g.get("NZBName") or "?", "status": _status_label(status),
+                "progress": round(1 - left / size, 4) if size else 0.0,
+                "size": size, "left": left, "speed": speed,
+                "eta": int(left / speed) if speed else -1,
+                "category": g.get("Category") or None,
+                "paused": status == "PAUSED", "canTop": True, "canDeleteFiles": False,
+            })
+        client = {"id": self.id, "name": self.name, "kind": self.kind, "speed": rate,
+                  "paused": bool(st.get("DownloadPaused")), "count": len(items), "seeding": 0}
+        return client, items
+
+    def act(self, item_id, act):
+        if item_id is None:
+            if act not in ("pause", "resume"):
+                raise ApiError("Unknown action")
+            self.rpc("pausedownload" if act == "pause" else "resumedownload")
+            return {"message": f"{self.name} {'paused' if act == 'pause' else 'resumed'}"}
+        cmd = {"pause": "GroupPause", "resume": "GroupResume", "delete": "GroupDelete",
+               "delete_files": "GroupFinalDelete", "top": "GroupMoveTop"}.get(act)
+        if not cmd:
+            raise ApiError("Unknown action")
+        ok = self.rpc("editqueue", cmd, "", [int(item_id)])
+        if ok is False:
+            raise ApiError(f"{self.name} refused that")
+        return {"message": {"pause": "Paused", "resume": "Resumed", "delete": "Deleted",
+                            "delete_files": "Deleted", "top": "Moved to top"}[act]}
+
+
+QB_STATES = {"downloading": "Downloading", "forcedDL": "Downloading", "metaDL": "Fetching metadata",
+             "forcedMetaDL": "Fetching metadata", "stalledDL": "Stalled", "queuedDL": "Queued",
+             "pausedDL": "Paused", "stoppedDL": "Paused", "checkingDL": "Checking",
+             "checkingResumeData": "Checking", "allocating": "Allocating", "moving": "Moving",
+             "error": "Error", "missingFiles": "Missing files"}
+
+
+class QBittorrent:
+    kind = "qbittorrent"
+
+    def __init__(self, conf):
+        self.id = conf.get("id", "qbittorrent")
+        self.name = conf.get("name", "qBittorrent")
+        self.url = conf["url"].rstrip("/")
+        self.user, self.pw = conf.get("username") or "", conf.get("password") or ""
+        self.s = requests.Session()
+        self.lock = threading.Lock()
+        self.logged_in = False
+
+    def login(self):
+        r = self.s.post(f"{self.url}/api/v2/auth/login", data={"username": self.user, "password": self.pw},
+                        headers={"Referer": self.url}, timeout=10)
+        if r.status_code == 403:
+            raise ApiError(f"{self.name}: login blocked — too many failed attempts, try again later", 502)
+        if r.text.strip() != "Ok.":
+            raise ApiError(f"{self.name}: wrong username or password", 502)
+        self.logged_in = True
+
+    def req(self, method, path, ok404=False, **kw):
+        for attempt in range(2):
+            with self.lock:
+                if not self.logged_in and (self.user or self.pw):
+                    self.login()
+            r = self.s.request(method, f"{self.url}/api/v2{path}", headers={"Referer": self.url}, timeout=15, **kw)
+            if r.status_code == 403 and attempt == 0:
+                self.logged_in = False
+                if not (self.user or self.pw):
+                    break
+                continue
+            if r.status_code == 404 and ok404:
+                return None
+            if r.status_code >= 400:
+                raise ApiError(f"{self.name}: HTTP {r.status_code}", 502)
+            return r
+        raise ApiError(f"{self.name}: not authorised", 502)
+
+    def snapshot(self):
+        d = par(info=lambda: self.req("GET", "/transfer/info").json(),
+                ts=lambda: self.req("GET", "/torrents/info").json())
+        info, ts = d["info"] or {}, d["ts"] or []
+        items, seeding = [], 0
+        for t in sorted(ts, key=lambda t: (t.get("priority") or 10 ** 6, t.get("added_on") or 0)):
+            prog = float(t.get("progress") or 0)
+            if prog >= 1:
+                seeding += 1
+                continue
+            state = t.get("state") or ""
+            size = int(t.get("size") or t.get("total_size") or 0)
+            left = int(t.get("amount_left") if t.get("amount_left") is not None else size * (1 - prog))
+            eta = t.get("eta")
+            items.append({
+                "client": self.id, "clientName": self.name, "id": t.get("hash"),
+                "name": t.get("name") or "?", "status": QB_STATES.get(state, state or "?"),
+                "progress": round(prog, 4), "size": size, "left": left,
+                "speed": int(t.get("dlspeed") or 0),
+                "eta": -1 if eta is None or eta >= 8640000 else int(eta),
+                "category": t.get("category") or None,
+                "paused": state in ("pausedDL", "stoppedDL"), "canTop": False, "canDeleteFiles": True,
+            })
+        client = {"id": self.id, "name": self.name, "kind": self.kind,
+                  "speed": int(info.get("dl_info_speed") or 0),
+                  "paused": bool(items) and all(i["paused"] for i in items),
+                  "count": len(items), "seeding": seeding}
+        return client, items
+
+    def act(self, item_id, act):
+        hashes = item_id or "all"
+        if act in ("pause", "resume"):
+            new, old = ("stop", "pause") if act == "pause" else ("start", "resume")
+            # qBittorrent 5 renamed pause/resume to stop/start
+            if self.req("POST", f"/torrents/{new}", ok404=True, data={"hashes": hashes}) is None:
+                self.req("POST", f"/torrents/{old}", data={"hashes": hashes})
+            return {"message": ("Paused" if act == "pause" else "Resumed") + ("" if item_id else f" all in {self.name}")}
+        if act in ("delete", "delete_files") and item_id:
+            self.req("POST", "/torrents/delete",
+                     data={"hashes": hashes, "deleteFiles": "true" if act == "delete_files" else "false"})
+            return {"message": "Deleted" + (" with files" if act == "delete_files" else "")}
+        raise ApiError("Unknown action")
+
+
+def downloads_snapshot():
+    clients, items = [], []
+    futs = [(c, POOL.submit(c.snapshot)) for c in CLIENTS.values()]
+    for c, fut in futs:
+        try:
+            info, its = fut.result()
+            clients.append(info)
+            items.extend(its)
+        except Exception as e:
+            msg = e.message if isinstance(e, ApiError) else f"Couldn't reach {c.name}"
+            clients.append({"id": c.id, "name": c.name, "kind": c.kind, "speed": 0, "paused": False,
+                            "count": 0, "seeding": 0, "error": msg})
+    items.sort(key=_sort_rank)
+    return {"clients": clients, "items": items}
+
+
 # ---------------------------------------------------------------- wiring
 
 def init():
     global CFG, FILES
     CFG = load_config()
     SERVICES.clear()
+    CLIENTS.clear()
     for c in CFG.get("radarr") or []:
         s = Radarr(c)
         SERVICES[(s.kind, s.inst)] = s
@@ -896,7 +1297,13 @@ def init():
         s = Seerr(c)
         SERVICES[(s.kind, s.inst)] = s
     FILES = FileStation(CFG["filestation"]) if CFG.get("filestation") else None
-    log.info("Loaded %d services, File Station %s", len(SERVICES), "on" if FILES else "off")
+    for key, cls in (("nzbget", NzbGet), ("qbittorrent", QBittorrent)):
+        conf = CFG.get(key)
+        for c in (conf if isinstance(conf, list) else [conf] if conf else []):
+            cl = cls(c)
+            CLIENTS[cl.id] = cl
+    log.info("Loaded %d services, %d download clients, File Station %s",
+             len(SERVICES), len(CLIENTS), "on" if FILES else "off")
 
 
 def load_config():
@@ -911,9 +1318,21 @@ def svc(kind, inst):
     return s
 
 
+def warm_loop():
+    """Keep every home page warm so switching tabs on the TV is instant."""
+    time.sleep(2)
+    while True:
+        for s in list(SERVICES.values()):
+            s.refresh_home()
+        time.sleep(240)
+
+
+PUBLIC = ("/", "/apk")
+
+
 @app.before_request
 def check_token():
-    if request.path == "/":
+    if request.path in PUBLIC:
         return None
     token = CFG.get("token") or ""
     given = request.headers.get("X-Token") or request.args.get("t") or ""
@@ -947,6 +1366,13 @@ def root():
     return jsonify(name="Harbour gateway", version=VERSION, ok=True)
 
 
+@app.get("/apk")
+def apk():
+    """Short link for Downloader: http://<nas>:8765/apk → newest Harbour.apk on GitHub."""
+    repo = CFG.get("github_repo") or DEFAULT_REPO
+    return Response(status=302, headers={"Location": f"https://github.com/{repo}/releases/latest/download/Harbour.apk"})
+
+
 @app.get("/api/ping")
 def ping():
     return jsonify(ok=True, version=VERSION)
@@ -955,8 +1381,11 @@ def ping():
 @app.get("/api/config")
 def config():
     return jsonify(name=CFG.get("name", "Harbour"),
+                   version=VERSION,
                    services=[s.info() for s in SERVICES.values()],
-                   files=FILES is not None)
+                   files=FILES is not None,
+                   downloads=bool(CLIENTS),
+                   repo=CFG.get("github_repo") or DEFAULT_REPO)
 
 
 @app.post("/api/reload")
@@ -965,9 +1394,17 @@ def reload_config():
     return config()
 
 
+@app.post("/api/log")
+def app_log():
+    """The TV app posts crash reports here so they show up in Container Manager's log."""
+    b = request.get_json(silent=True) or {}
+    log.warning("APP REPORT (%s)\n%s", b.get("version", "?"), str(b.get("text", ""))[:20000])
+    return jsonify(ok=True)
+
+
 @app.get("/api/svc/<kind>/<inst>/home")
 def svc_home(kind, inst):
-    return jsonify(svc(kind, inst).home())
+    return jsonify(svc(kind, inst).home_cached())
 
 
 @app.get("/api/svc/<kind>/<inst>/search")
@@ -983,7 +1420,24 @@ def svc_detail(kind, inst, item_id):
 @app.post("/api/svc/<kind>/<inst>/item/<item_id>/action")
 def svc_action(kind, inst, item_id):
     b = request.get_json(silent=True) or {}
-    return jsonify(svc(kind, inst).act(item_id, b.get("action"), b.get("arg")))
+    return jsonify(svc(kind, inst).act(item_id, b.get("action"), b.get("arg"), b.get("choice")))
+
+
+@app.get("/api/svc/<kind>/<inst>/item/<item_id>/releases")
+def svc_releases(kind, inst, item_id):
+    s = svc(kind, inst)
+    if not hasattr(s, "releases"):
+        raise ApiError("Manual search isn't available here")
+    return jsonify(s.releases(item_id, request.args.get("arg")))
+
+
+@app.post("/api/svc/<kind>/<inst>/item/<item_id>/grab")
+def svc_grab(kind, inst, item_id):
+    s = svc(kind, inst)
+    b = request.get_json(silent=True) or {}
+    if not hasattr(s, "grab"):
+        raise ApiError("Manual search isn't available here")
+    return jsonify(s.grab(b.get("guid"), b.get("indexerId")))
 
 
 @app.get("/img/<kind>/<inst>/<path:p>")
@@ -1013,10 +1467,27 @@ def files_op():
     return jsonify(files().op(request.get_json(silent=True) or {}))
 
 
+@app.get("/api/downloads")
+def downloads():
+    if not CLIENTS:
+        raise ApiError("No download clients configured", 404)
+    return jsonify(downloads_snapshot())
+
+
+@app.post("/api/downloads/action")
+def downloads_action():
+    b = request.get_json(silent=True) or {}
+    c = CLIENTS.get(b.get("client"))
+    if not c:
+        raise ApiError("Unknown download client", 404)
+    return jsonify(c.act(b.get("id"), b.get("action")))
+
+
 if os.path.exists(CONFIG_PATH):
     init()
 else:
     log.warning("No config at %s — copy config.example.json there", CONFIG_PATH)
 
 if __name__ == "__main__":
+    threading.Thread(target=warm_loop, daemon=True).start()
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", "8765")), threaded=True)

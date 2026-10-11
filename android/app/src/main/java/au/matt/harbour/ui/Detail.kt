@@ -1,6 +1,7 @@
 package au.matt.harbour.ui
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.focusable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -18,6 +19,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -30,11 +32,9 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
-import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
-import androidx.compose.ui.focus.focusRestorer
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
@@ -51,8 +51,16 @@ import au.matt.harbour.data.runAction
 import coil.compose.AsyncImage
 import kotlinx.coroutines.launch
 
+/** An action waiting on the user: optionally a picked choice, then optionally a confirmation. */
+private data class Pending(val action: ActionDef, val choice: String? = null)
+
 @Composable
-fun DetailScreen(svc: ServiceInfo, itemId: String, onClose: () -> Unit) {
+fun DetailScreen(
+    svc: ServiceInfo,
+    itemId: String,
+    onClose: () -> Unit,
+    onOpenReleases: (arg: String?, title: String) -> Unit,
+) {
     val gw = LocalGateway.current
     val toaster = LocalToaster.current
     val cache = LocalCache.current
@@ -61,7 +69,9 @@ fun DetailScreen(svc: ServiceInfo, itemId: String, onClose: () -> Unit) {
     var error by remember { mutableStateOf<String?>(null) }
     var reload by remember { mutableIntStateOf(0) }
     var busy by remember { mutableStateOf<String?>(null) }
-    var confirm by remember { mutableStateOf<ActionDef?>(null) }
+    var choosing by remember { mutableStateOf<ActionDef?>(null) }
+    var confirming by remember { mutableStateOf<Pending?>(null) }
+    var episodeMenu by remember { mutableStateOf<Episode?>(null) }
 
     LaunchedEffect(reload) {
         error = null
@@ -72,12 +82,12 @@ fun DetailScreen(svc: ServiceInfo, itemId: String, onClose: () -> Unit) {
         }
     }
 
-    val run: (ActionDef) -> Unit = { a ->
+    val run: (ActionDef, String?) -> Unit = { a, choice ->
         if (busy == null) {
             busy = a.label
             scope.launch {
                 try {
-                    val r = gw.runAction(svc, itemId, a)
+                    val r = gw.runAction(svc, itemId, a, choice)
                     toaster.show(r.message)
                     cache.invalidate(svc)
                     busy = null
@@ -89,50 +99,90 @@ fun DetailScreen(svc: ServiceInfo, itemId: String, onClose: () -> Unit) {
             }
         }
     }
-    val trigger: (ActionDef) -> Unit = { a -> if (a.confirm != null) confirm = a else run(a) }
+    val afterChoice: (ActionDef, String?) -> Unit = { a, choice ->
+        if (a.confirm != null) confirming = Pending(a, choice) else run(a, choice)
+    }
+    val trigger: (ActionDef) -> Unit = { a ->
+        when {
+            a.opens == "releases" -> onOpenReleases(a.arg, detail?.item?.title ?: "")
+            a.choose != null && a.choose.options.size > 1 -> choosing = a
+            else -> afterChoice(a, a.choose?.options?.firstOrNull()?.value)
+        }
+    }
 
     val d = detail
     val err = error
     when {
-        d != null -> DetailContent(d, onAction = trigger, onBack = onClose)
+        d != null -> DetailContent(d, onAction = trigger, onBack = onClose, onEpisode = { episodeMenu = it })
         err != null -> ErrorPanel(err, onRetry = { reload++ })
         else -> Loading()
     }
 
-    confirm?.let { a ->
-        ConfirmDialog(
-            title = a.label,
-            message = a.confirm ?: "",
-            confirmLabel = a.label,
-            danger = a.style == "danger",
-            onConfirm = {
-                confirm = null
-                run(a)
+    episodeMenu?.let { ep ->
+        MenuDialog(
+            title = "${ep.label} · ${ep.title}",
+            subtitle = ep.subtitle,
+            items = ep.actions.map { it.label to it.style },
+            onPick = { i ->
+                episodeMenu = null
+                ep.actions.getOrNull(i)?.let(trigger)
             },
-            onDismiss = { confirm = null },
+            onDismiss = { episodeMenu = null },
+        )
+    }
+    choosing?.let { a ->
+        val opts = a.choose?.options.orEmpty()
+        MenuDialog(
+            title = a.choose?.title ?: a.label,
+            items = opts.map { it.label to null },
+            onPick = { i ->
+                choosing = null
+                afterChoice(a, opts.getOrNull(i)?.value)
+            },
+            onDismiss = { choosing = null },
+        )
+    }
+    confirming?.let { p ->
+        ConfirmDialog(
+            title = p.action.label,
+            message = p.action.confirm ?: "",
+            confirmLabel = p.action.label,
+            danger = p.action.style == "danger",
+            onConfirm = {
+                confirming = null
+                run(p.action, p.choice)
+            },
+            onDismiss = { confirming = null },
         )
     }
     busy?.let { BusyDialog("$it…") }
 }
 
-@OptIn(ExperimentalComposeUiApi::class)
 @Composable
-private fun DetailContent(d: Detail, onAction: (ActionDef) -> Unit, onBack: () -> Unit) {
+private fun DetailContent(
+    d: Detail,
+    onAction: (ActionDef) -> Unit,
+    onBack: () -> Unit,
+    onEpisode: (Episode) -> Unit,
+) {
     val gw = LocalGateway.current
     val firstButton = remember { FocusRequester() }
     var grabbed by remember { mutableStateOf(false) }
     var seasonIndex by rememberSaveable { mutableIntStateOf(0) }
     val season: Season? = d.seasons.getOrNull(seasonIndex)
+    val listState = rememberLazyListState()
 
     Box(Modifier.fillMaxSize()) {
         Backdrop(gw.img(d.item.backdrop ?: d.item.poster))
         LazyColumn(
+            state = listState,
             modifier = Modifier.fillMaxSize(),
-            contentPadding = PaddingValues(start = 48.dp, end = 48.dp, top = 40.dp, bottom = 60.dp),
-            verticalArrangement = Arrangement.spacedBy(18.dp),
+            contentPadding = PaddingValues(start = 48.dp, end = 48.dp, top = 32.dp, bottom = 60.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
             item(key = "header") {
-                Row {
+                // Focusable (but invisible) so pressing Up from the buttons scrolls the title back into view.
+                Row(Modifier.focusable()) {
                     val poster = gw.img(d.item.poster)
                     if (poster != null) {
                         AsyncImage(
@@ -140,25 +190,25 @@ private fun DetailContent(d: Detail, onAction: (ActionDef) -> Unit, onBack: () -
                             contentDescription = d.item.title,
                             contentScale = ContentScale.Crop,
                             modifier = Modifier
-                                .width(150.dp)
+                                .width(124.dp)
                                 .aspectRatio(2f / 3f)
                                 .clip(RoundedCornerShape(10.dp)),
                         )
-                        Spacer(Modifier.width(28.dp))
+                        Spacer(Modifier.width(26.dp))
                     }
-                    Column(Modifier.widthIn(max = 540.dp)) {
-                        Text(d.item.title, color = HColors.Text, fontSize = 32.sp, fontWeight = FontWeight.Bold,
-                            maxLines = 2, overflow = TextOverflow.Ellipsis, lineHeight = 36.sp)
-                        Spacer(Modifier.height(8.dp))
+                    Column(Modifier.widthIn(max = 600.dp)) {
+                        Text(d.item.title, color = HColors.Text, fontSize = 30.sp, fontWeight = FontWeight.Bold,
+                            maxLines = 2, overflow = TextOverflow.Ellipsis, lineHeight = 34.sp)
+                        Spacer(Modifier.height(6.dp))
                         Row(verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                             d.item.subtitle?.let { Text(it, color = HColors.TextDim, fontSize = 15.sp) }
                             d.item.badge?.let { Pill(it, d.item.badgeTone) }
                         }
                         d.item.overview?.let {
-                            Spacer(Modifier.height(12.dp))
+                            Spacer(Modifier.height(10.dp))
                             Text(it, color = HColors.Text.copy(alpha = 0.88f), fontSize = 14.sp,
-                                lineHeight = 20.sp, maxLines = 7, overflow = TextOverflow.Ellipsis)
+                                lineHeight = 20.sp, maxLines = 5, overflow = TextOverflow.Ellipsis)
                         }
                     }
                 }
@@ -181,6 +231,7 @@ private fun DetailContent(d: Detail, onAction: (ActionDef) -> Unit, onBack: () -
                 if (!grabbed) {
                     LaunchedEffect(Unit) {
                         runCatching { firstButton.requestFocus() }
+                        listState.scrollToItem(0)
                         grabbed = true
                     }
                 }
@@ -191,9 +242,8 @@ private fun DetailContent(d: Detail, onAction: (ActionDef) -> Unit, onBack: () -
             if (d.seasons.isNotEmpty()) {
                 item(key = "seasons") {
                     LazyRow(
-                        modifier = Modifier.focusRestorer(),
                         horizontalArrangement = Arrangement.spacedBy(10.dp),
-                        contentPadding = PaddingValues(vertical = 6.dp),
+                        contentPadding = PaddingValues(vertical = 6.dp, horizontal = 2.dp),
                     ) {
                         itemsIndexed(d.seasons, key = { _, s -> "s${s.number}" }) { i, s ->
                             SeasonChip(
@@ -206,17 +256,21 @@ private fun DetailContent(d: Detail, onAction: (ActionDef) -> Unit, onBack: () -
                 }
                 if (season != null) {
                     item(key = "season-head-${season.number}") {
-                        Row(verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-                            Column {
+                        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                            Row(verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                                 Text(season.label, color = HColors.Text, fontSize = 20.sp, fontWeight = FontWeight.Bold)
                                 season.subtitle?.let { Text(it, color = HColors.TextDim, fontSize = 13.sp) }
                             }
-                            season.action?.let { a -> TvButton(a.label, { onAction(a) }) }
+                            if (season.actions.isNotEmpty()) {
+                                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                                    season.actions.forEach { a -> TvButton(a.label, { onAction(a) }, style = a.style) }
+                                }
+                            }
                         }
                     }
                     items(season.episodes, key = { "ep${it.id}" }) { ep ->
-                        EpisodeRow(ep, onClick = { ep.action?.let(onAction) })
+                        EpisodeRow(ep, onClick = { if (ep.actions.isNotEmpty()) onEpisode(ep) })
                     }
                 }
             }
@@ -228,9 +282,9 @@ private fun DetailContent(d: Detail, onAction: (ActionDef) -> Unit, onBack: () -
 private fun FactsGrid(d: Detail) {
     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
         d.facts.chunked(3).forEach { rowFacts ->
-            Row(horizontalArrangement = Arrangement.spacedBy(24.dp)) {
+            Row(horizontalArrangement = Arrangement.spacedBy(20.dp)) {
                 rowFacts.forEach { f ->
-                    Column(Modifier.width(250.dp)) {
+                    Column(Modifier.width(240.dp)) {
                         Text(f.label.uppercase(), color = HColors.TextDim, fontSize = 11.sp,
                             fontWeight = FontWeight.Bold, letterSpacing = 1.sp)
                         Text(f.value, color = HColors.Text, fontSize = 14.sp, maxLines = 2,
@@ -293,9 +347,9 @@ private fun EpisodeRow(ep: Episode, onClick: () -> Unit) {
                 ep.subtitle?.let { Text(it, color = HColors.TextDim, fontSize = 12.sp, maxLines = 1) }
             }
             Text(
-                if (ep.hasFile) "✓" else if (f && ep.action != null) "Search" else "",
-                color = if (ep.hasFile) HColors.Ok else HColors.TextDim,
-                fontSize = if (ep.hasFile) 18.sp else 13.sp,
+                if (f) "Options" else if (ep.hasFile) "✓" else "",
+                color = if (f) HColors.TextDim else HColors.Ok,
+                fontSize = if (f) 13.sp else 18.sp,
                 fontWeight = FontWeight.Bold,
             )
         }

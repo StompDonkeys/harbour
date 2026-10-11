@@ -2,6 +2,8 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- In-app updates: lets Harbour hand a newer APK to Android's installer -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 
     <!-- TV app: no touchscreen, leanback launcher -->
     <uses-feature android:name="android.software.leanback" android:required="false" />
@@ -28,5 +30,9 @@
                 <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <receiver
+            android:name=".data.InstallResultReceiver"
+            android:exported="false" />
     </application>
 </manifest>
