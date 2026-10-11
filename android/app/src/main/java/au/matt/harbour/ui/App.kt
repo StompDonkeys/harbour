@@ -85,7 +85,12 @@ fun HarbourApp(prefs: Prefs) {
     val context = LocalContext.current
     var url by remember { mutableStateOf(prefs.url) }
     var token by remember { mutableStateOf(prefs.token) }
-    val gateway = remember(url, token) { if (url.isBlank()) null else Gateway(url, token) }
+    var plexUser by remember { mutableStateOf(prefs.plexUser) }
+    var plexPin by remember { mutableStateOf(prefs.plexPin) }
+    var plexName by remember { mutableStateOf(prefs.plexUserName) }
+    val gateway = remember(url, token, plexUser, plexPin) {
+        if (url.isBlank()) null else Gateway(url, token, plexUser, plexPin)
+    }
     var loadedConfig by remember { mutableStateOf<GatewayConfig?>(null) }
     var configError by remember { mutableStateOf<String?>(null) }
     var reloadKey by remember { mutableIntStateOf(0) }
@@ -141,6 +146,18 @@ fun HarbourApp(prefs: Prefs) {
             repo = loadedConfig?.repo ?: "StompDonkeys/harbour",
             update = update,
             onUpdateFound = { update = it },
+            plexEnabled = loadedConfig?.plex == true,
+            gateway = gateway,
+            plexName = plexName,
+            onPlexProfile = { id, name, pin ->
+                prefs.plexUser = id
+                prefs.plexUserName = name
+                prefs.plexPin = pin
+                plexUser = id
+                plexName = name
+                plexPin = pin
+                toaster.show(if (id.isBlank()) "Following the Plex owner account" else "Following $name on Plex")
+            },
         )
     }
 
@@ -256,6 +273,7 @@ private fun MainShell(config: GatewayConfig, settings: @Composable () -> Unit, u
                             itemId = screen.itemId,
                             onClose = { pop() },
                             onOpenReleases = { arg, title -> push(Screen.Releases(screen.svc, screen.itemId, arg, title)) },
+                            onOpenId = { id -> push(Screen.Detail(screen.svc, id)) },
                             onOpenItem = { ref ->
                                 // "kind/inst/id", e.g. radarr/radarr-truehd/123 — jump to that app's page
                                 val parts = ref.split("/", limit = 3)

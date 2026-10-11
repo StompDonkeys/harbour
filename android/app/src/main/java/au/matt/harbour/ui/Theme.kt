@@ -28,6 +28,7 @@ fun toneColor(tone: String?): Color = when (tone) {
 }
 
 fun iconFor(icon: String?): String = when (icon) {
+    "home" -> "🏠"
     "movie" -> "🎬"
     "4k" -> "🎞️"
     "tv" -> "📺"

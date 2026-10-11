@@ -25,6 +25,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import au.matt.harbour.data.HomePage
@@ -158,6 +159,7 @@ fun MediaRowView(
     shouldGrab: (String) -> Boolean,
     onGrabbed: () -> Unit,
     onSeeAll: (key: String, title: String) -> Unit = { _, _ -> },
+    edgePadding: Dp = 48.dp,
 ) {
     val gw = LocalGateway.current
     val scope = rememberCoroutineScope()
@@ -195,10 +197,10 @@ fun MediaRowView(
             color = HColors.Text,
             fontSize = 18.sp,
             fontWeight = FontWeight.SemiBold,
-            modifier = Modifier.padding(start = 48.dp, bottom = 2.dp),
+            modifier = Modifier.padding(start = edgePadding, bottom = 2.dp),
         )
         LazyRow(
-            contentPadding = PaddingValues(horizontal = 48.dp, vertical = 10.dp),
+            contentPadding = PaddingValues(horizontal = edgePadding, vertical = 10.dp),
             horizontalArrangement = Arrangement.spacedBy(14.dp),
         ) {
             itemsIndexed(items, key = { i, it -> "$i:${it.key}" }) { i, item ->

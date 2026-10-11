@@ -1,5 +1,15 @@
 package au.matt.harbour.ui
 
+import android.content.ActivityNotFoundException
+import android.content.Context
+import android.content.Intent
+import android.net.Uri
+import androidx.compose.foundation.border
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.style.TextAlign
+import au.matt.harbour.data.Person
 import androidx.compose.foundation.background
 import androidx.compose.foundation.focusable
 import androidx.compose.foundation.layout.Arrangement
@@ -61,7 +71,9 @@ fun DetailScreen(
     onClose: () -> Unit,
     onOpenReleases: (arg: String?, title: String) -> Unit,
     onOpenItem: (ref: String) -> Unit = {},
+    onOpenId: (id: String) -> Unit = {},
 ) {
+    val context = LocalContext.current
     val gw = LocalGateway.current
     val toaster = LocalToaster.current
     val cache = LocalCache.current
@@ -107,6 +119,18 @@ fun DetailScreen(
         when {
             a.opens == "releases" -> onOpenReleases(a.arg, detail?.item?.title ?: "")
             a.opens == "item" && a.arg != null -> onOpenItem(a.arg)
+            a.opens == "youtube" && a.arg != null -> {
+                if (!openExternal(context, "vnd.youtube:${a.arg}") &&
+                    !openExternal(context, "https://www.youtube.com/watch?v=${a.arg}")
+                ) toaster.show("Couldn't open YouTube — is the YouTube app installed?")
+            }
+            a.opens == "plex" && a.arg != null -> {
+                val (machine, key) = a.arg.split("|", limit = 2).let { it[0] to it.getOrElse(1) { "" } }
+                val deep = "plex://server://$machine/com.plexapp.plugins.library/library/metadata/$key"
+                if (!openExternal(context, deep, PLEX_PACKAGE) && !launchApp(context, PLEX_PACKAGE)) {
+                    toaster.show("Couldn't open Plex — is the Plex app installed?")
+                }
+            }
             a.choose != null && a.choose.options.size > 1 -> choosing = a
             else -> afterChoice(a, a.choose?.options?.firstOrNull()?.value)
         }
@@ -115,7 +139,8 @@ fun DetailScreen(
     val d = detail
     val err = error
     when {
-        d != null -> DetailContent(d, onAction = trigger, onBack = onClose, onEpisode = { episodeMenu = it })
+        d != null -> DetailContent(svc, d, onAction = trigger, onBack = onClose, onEpisode = { episodeMenu = it },
+            onOpenId = onOpenId)
         err != null -> ErrorPanel(err, onRetry = { reload++ })
         else -> Loading()
     }
@@ -162,10 +187,12 @@ fun DetailScreen(
 
 @Composable
 private fun DetailContent(
+    svc: ServiceInfo,
     d: Detail,
     onAction: (ActionDef) -> Unit,
     onBack: () -> Unit,
     onEpisode: (Episode) -> Unit,
+    onOpenId: (String) -> Unit,
 ) {
     val gw = LocalGateway.current
     val firstButton = remember { FocusRequester() }
@@ -241,6 +268,28 @@ private fun DetailContent(
             if (d.facts.isNotEmpty()) {
                 item(key = "facts") { FactsGrid(d) }
             }
+            if (d.people.isNotEmpty()) {
+                item(key = "people") {
+                    Column {
+                        Text("Cast", color = HColors.Text, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
+                        LazyRow(
+                            horizontalArrangement = Arrangement.spacedBy(14.dp),
+                            contentPadding = PaddingValues(vertical = 10.dp, horizontal = 2.dp),
+                        ) {
+                            items(d.people, key = { it.id }) { p -> PersonCard(p, onClick = { onOpenId(p.id) }) }
+                        }
+                    }
+                }
+            }
+            if (d.rows.isNotEmpty()) {
+                itemsIndexed(d.rows, key = { i, r -> "xrow$i:${r.title}" }) { i, r ->
+                    MediaRowView(
+                        svc = svc, row = r, rowIndex = 100 + i, onOpen = onOpenId,
+                        onFocusItem = { _, _ -> }, shouldGrab = { false }, onGrabbed = {},
+                        edgePadding = 2.dp,
+                    )
+                }
+            }
             if (d.seasons.isNotEmpty()) {
                 item(key = "seasons") {
                     LazyRow(
@@ -278,6 +327,75 @@ private fun DetailContent(
             }
         }
     }
+}
+
+@Composable
+private fun PersonCard(p: Person, onClick: () -> Unit) {
+    val gw = LocalGateway.current
+    FocusBox(
+        onClick = onClick,
+        modifier = Modifier.width(104.dp),
+        shape = RoundedCornerShape(14.dp),
+        focusedScale = 1.06f,
+        borderWidth = 0.dp,
+    ) { f ->
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .background(if (f) HColors.SurfaceHi else Color.Transparent)
+                .padding(vertical = 8.dp, horizontal = 4.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            Box(
+                Modifier
+                    .size(84.dp)
+                    .clip(CircleShape)
+                    .background(HColors.Surface)
+                    .border(if (f) 3.dp else 0.dp, if (f) Color.White else Color.Transparent, CircleShape),
+                contentAlignment = Alignment.Center,
+            ) {
+                val photo = gw.img(p.photo)
+                if (photo != null) {
+                    AsyncImage(model = photo, contentDescription = p.name, contentScale = ContentScale.Crop,
+                        modifier = Modifier.fillMaxSize())
+                } else {
+                    Text(p.name.take(1), color = HColors.TextDim, fontSize = 30.sp, fontWeight = FontWeight.Bold)
+                }
+            }
+            Spacer(Modifier.height(6.dp))
+            Text(p.name, color = HColors.Text, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, maxLines = 2,
+                overflow = TextOverflow.Ellipsis, textAlign = TextAlign.Center)
+            p.role?.let {
+                Text(it, color = HColors.TextDim, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                    textAlign = TextAlign.Center)
+            }
+        }
+    }
+}
+
+private const val PLEX_PACKAGE = "com.plexapp.android"
+
+/** Opens a link in whichever app handles it; false if nothing does. */
+private fun openExternal(context: Context, uri: String, pkg: String? = null): Boolean = try {
+    context.startActivity(
+        Intent(Intent.ACTION_VIEW, Uri.parse(uri)).apply {
+            if (pkg != null) setPackage(pkg)
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        },
+    )
+    true
+} catch (e: ActivityNotFoundException) {
+    false
+} catch (e: SecurityException) {
+    false
+}
+
+private fun launchApp(context: Context, pkg: String): Boolean {
+    val intent = context.packageManager.getLaunchIntentForPackage(pkg)
+        ?: context.packageManager.getLeanbackLaunchIntentForPackage(pkg)
+        ?: return false
+    context.startActivity(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+    return true
 }
 
 @Composable

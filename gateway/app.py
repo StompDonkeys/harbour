@@ -10,6 +10,7 @@ download queues).
 Config: /config/config.json (see config.example.json). Override with HARBOUR_CONFIG.
 """
 import hmac
+import xml.etree.ElementTree as ET
 import json
 import logging
 import os
@@ -23,7 +24,7 @@ from datetime import datetime, timedelta, timezone
 from urllib.parse import quote, urlsplit
 
 import requests
-from flask import Flask, Response, jsonify, request, stream_with_context
+from flask import Flask, Response, has_request_context, jsonify, request, stream_with_context
 
 VERSION = "0.2.0"
 CONFIG_PATH = os.environ.get("HARBOUR_CONFIG", "/config/config.json")
@@ -38,6 +39,8 @@ app.json.sort_keys = False
 CFG = {}
 SERVICES = {}  # (kind, inst) -> service object, in config order
 FILES = None
+HUB = None
+PLEX = None
 CLIENTS = {}   # download clients by id
 POOL = ThreadPoolExecutor(max_workers=16)
 DEFAULT_REPO = "StompDonkeys/harbour"
@@ -478,6 +481,8 @@ class Radarr(Arr):
         acts = [
             action("search", "Auto search", "primary"),
             action("releases", "Manual search", opens="releases", arg="movie"),
+            *([action("info", "Cast & more", opens="item", arg=f"hub/hub/movie-{m['tmdbId']}")]
+              if HUB and m.get("tmdbId") else []),
             action("unmonitor", "Unmonitor") if m.get("monitored") else action("monitor", "Monitor"),
             action("delete", "Remove", confirm=f"Remove “{m.get('title')}” from {self.name}? Files stay on the NAS."),
             action("delete_files", "Delete + files", "danger",
@@ -687,6 +692,8 @@ class Sonarr(Arr):
             }))
         acts = [
             action("search", "Search all missing", "primary"),
+            *([action("info", "Cast & more", opens="item", arg=f"hub/hub/tv-{s['tmdbId']}")]
+              if HUB and s.get("tmdbId") else []),
             action("unmonitor", "Unmonitor") if s.get("monitored") else action("monitor", "Monitor"),
             action("delete", "Remove", confirm=f"Remove “{s.get('title')}” from {self.name}? Files stay on the NAS."),
             action("delete_files", "Delete + files", "danger",
@@ -890,8 +897,12 @@ class Seerr(HomeCache):
         return mt, int(tid)
 
     def detail(self, item_id):
+        if HUB is not None:  # the Home hub builds the rich page (cast, recommendations, Plex…)
+            return HUB.detail(item_id)
         mt, tid = self._split(item_id)
-        d = self._req("GET", f"/{mt}/{tid}")
+        return self.detail_from(mt, tid, self._req("GET", f"/{mt}/{tid}"))
+
+    def detail_from(self, mt, tid, d):
         mi = d.get("mediaInfo") or {}
         st, st4k = mi.get("status"), mi.get("status4k")
         genres = ", ".join(g.get("name", "") for g in d.get("genres") or [])
@@ -1013,6 +1024,464 @@ class Seerr(HomeCache):
         self._req("POST", "/request", body=body)
         self.drop_home()
         return {"message": "Requested ✓", "refresh": True}
+
+
+# ---------------------------------------------------------------- Plex
+
+
+PLEX_TV = "https://plex.tv"
+
+
+def plex_user_from_request():
+    """The Plex Home profile the TV picked (Settings → Plex profile), sent as headers."""
+    if not has_request_context():
+        return None, None
+    return request.headers.get("X-Plex-User") or None, request.headers.get("X-Plex-Pin") or None
+
+
+class Plex:
+    def __init__(self, conf):
+        self.url = conf["url"].rstrip("/")
+        self.token = conf["token"]
+        self.default_user = str(conf.get("user") or "") or None
+        self.default_pin = str(conf.get("pin") or "") or None
+        self.client_id = "harbour-gateway"
+        self._tokens = {}       # home user id -> server access token
+        self._cache = {}
+        self._lock = threading.Lock()
+
+    def _headers(self, token):
+        return {"X-Plex-Token": token, "Accept": "application/json", "X-Plex-Client-Identifier": self.client_id,
+                "X-Plex-Product": "Harbour", "X-Plex-Version": VERSION}
+
+    def get(self, path, token=None, **params):
+        r = requests.get(self.url + path, headers=self._headers(token or self.token), params=params, timeout=20)
+        if r.status_code == 401:
+            raise ApiError("Plex: token rejected", 502)
+        if r.status_code >= 400:
+            raise ApiError(f"Plex: HTTP {r.status_code}", 502)
+        return (r.json() if r.content else {}).get("MediaContainer") or {}
+
+    def cached(self, key, ttl, fn):
+        hit = self._cache.get(key)
+        if hit and time.time() - hit[0] < ttl:
+            return hit[1]
+        val = fn()
+        self._cache[key] = (time.time(), val)
+        return val
+
+    def machine_id(self):
+        return self.cached("machine", 86400, lambda: self.get("/identity").get("machineIdentifier"))
+
+    # -- Plex Home profiles
+    def users(self):
+        def load():
+            r = requests.get(f"{PLEX_TV}/api/home/users", headers=self._headers(self.token), timeout=20)
+            if r.status_code >= 400:
+                raise ApiError(f"Plex: couldn't list Home users (HTTP {r.status_code})", 502)
+            root = ET.fromstring(r.content)
+            return [{"id": u.get("id"), "title": u.get("title") or u.get("username") or "?",
+                     "thumb": u.get("thumb"), "protected": u.get("protected") == "1",
+                     "admin": u.get("admin") == "1"} for u in root.iter("User")]
+        return self.cached("users", 600, load)
+
+    def token_for(self, user=None, pin=None):
+        """Server token for a Home user (by id or name). No user / the admin → the configured token."""
+        user, pin = user or self.default_user, pin or self.default_pin
+        if not user:
+            return self.token
+        with self._lock:
+            if user in self._tokens:
+                return self._tokens[user]
+        match = next((u for u in safe(self.users, "plex users", []) if user in (u["id"], u["title"])), None)
+        if not match or match["admin"]:
+            return self.token
+        params = {"pin": pin} if pin else {}
+        r = requests.post(f"{PLEX_TV}/api/home/users/{match['id']}/switch", params=params,
+                          headers=self._headers(self.token), timeout=20)
+        if r.status_code in (401, 403):
+            raise ApiError(f"Plex: {match['title']} needs the right PIN", 403)
+        if r.status_code >= 400:
+            raise ApiError(f"Plex: couldn't switch to {match['title']} (HTTP {r.status_code})", 502)
+        root = ET.fromstring(r.content)
+        user_token = root.get("authenticationToken") or root.get("authToken")
+        if not user_token:
+            raise ApiError("Plex: no token for that profile", 502)
+        res = requests.get(f"{PLEX_TV}/api/v2/resources", params={"includeHttps": 1},
+                           headers=self._headers(user_token), timeout=20)
+        server_token = user_token
+        if res.ok:
+            mid = self.machine_id()
+            for dev in res.json():
+                if dev.get("clientIdentifier") == mid and dev.get("accessToken"):
+                    server_token = dev["accessToken"]
+        with self._lock:
+            self._tokens[user] = server_token
+        return server_token
+
+    @staticmethod
+    def tmdb_of(meta):
+        for g in meta.get("Guid") or []:
+            gid = g.get("id", "")
+            if gid.startswith("tmdb://"):
+                return gid[7:]
+        return None
+
+    def show_tmdb(self, rating_key):
+        def load():
+            m = (self.get(f"/library/metadata/{rating_key}", includeGuids=1).get("Metadata") or [{}])[0]
+            return self.tmdb_of(m)
+        return self.cached(f"show-tmdb-{rating_key}", 86400, load)
+
+    def art(self, path, w=640, h=360):
+        if not path:
+            return None
+        return f"/plexart?w={w}&h={h}&p={quote(path, safe='')}"
+
+    def on_deck(self, token):
+        return self.get("/library/onDeck", token=token, includeGuids=1).get("Metadata") or []
+
+    def find(self, mt, tmdb_id, title, token):
+        """Find a title in Plex by its TMDB id (search by name, confirm by guid)."""
+        if not title:
+            return None
+        want = "movie" if mt == "movie" else "show"
+        res = self.get("/hubs/search", token=token, query=title, includeGuids=1, limit=20)
+        for hub in res.get("Hub") or []:
+            for m in hub.get("Metadata") or []:
+                if m.get("type") == want and self.tmdb_of(m) == str(tmdb_id):
+                    return m
+        return None
+
+
+# ---------------------------------------------------------------- Home hub
+
+def tmdb_img(path, size):
+    return f"{TMDB_IMG}{size}{path}" if path else None
+
+
+class Hub:
+    """
+    The Home tab and the rich title / person pages. Metadata (cast, filmographies,
+    recommendations) comes from TMDB via Seerr; ownership from Radarr/Sonarr; watch
+    state from Plex.
+    """
+    kind = "hub"
+
+    def __init__(self, conf, seerr, plex):
+        self.inst = "hub"
+        self.name = conf.get("name", "Home")
+        self.icon = conf.get("icon", "home")
+        self.seerr = seerr
+        self.plex = plex
+        self._homes = {}
+        self._lock = threading.Lock()
+
+    def info(self):
+        return {"kind": self.kind, "inst": self.inst, "name": self.name, "icon": self.icon}
+
+    # -- library lookups
+    def radarrs(self):
+        return [s for s in SERVICES.values() if isinstance(s, Radarr)]
+
+    def sonarrs(self):
+        return [s for s in SERVICES.values() if isinstance(s, Sonarr)]
+
+    def owned(self):
+        movies = {m.get("tmdbId") for r in self.radarrs() for m in safe(r.movies, r.name, []) if m.get("hasFile")}
+        shows = {s.get("tmdbId") for so in self.sonarrs() for s in safe(so.series, so.name, [])
+                 if (s.get("statistics") or {}).get("episodeFileCount")}
+        return movies, shows
+
+    def mark(self, card, owned):
+        """Add an 'In library' badge when we already have it."""
+        if not card:
+            return card
+        mt, _, tid = card["id"].partition("-")
+        mine = owned[0] if mt == "movie" else owned[1]
+        if tid.isdigit() and int(tid) in mine:
+            card["badge"], card["badgeTone"] = "In library", "ok"
+        return card
+
+    # -- home
+    def home_cached(self, user=None, pin=None):
+        key = user or ""
+        hit = self._homes.get(key)
+        if hit and time.time() - hit[0] < 60:
+            return hit[1]
+        with self._lock:
+            hit = self._homes.get(key)
+            if hit and time.time() - hit[0] < 60:
+                return hit[1]
+            val = self.home(user, pin)
+            self._homes[key] = (time.time(), val)
+            return val
+
+    def refresh_home(self):
+        try:
+            self._homes[""] = (time.time(), self.home())
+        except Exception as e:
+            log.warning("hub warm failed: %s", e)
+
+    def drop_home(self):
+        self._homes.clear()
+
+    def home(self, user=None, pin=None):
+        today = datetime.now(timezone.utc).date()
+        token = None
+        if self.plex:
+            token = safe(lambda: self.plex.token_for(user, pin), "plex token", None)
+        d = par(
+            deck=lambda: safe(lambda: self.plex.on_deck(token), "plex on deck", []) if (self.plex and token) else [],
+            radarr=lambda: [(r, safe(r.movies, r.name, [])) for r in self.radarrs()],
+            imports=lambda: [(s, safe(lambda: s.get("/history", page=1, pageSize=80, sortKey="date",
+                                                    sortDirection="descending", eventType=3, includeSeries="true",
+                                                    includeEpisode="true").get("records", []), f"{s.name} history", []))
+                             for s in self.sonarrs()],
+            mcal=lambda: [(r, safe(lambda: r.get("/calendar", start=today.isoformat(),
+                                                 end=(today + timedelta(days=60)).isoformat(), unmonitored="false"),
+                                   f"{r.name} calendar", [])) for r in self.radarrs()],
+            tcal=lambda: [(s, safe(lambda: s.get("/calendar", start=today.isoformat(),
+                                                 end=(today + timedelta(days=10)).isoformat(), includeSeries="true"),
+                                   f"{s.name} calendar", [])) for s in self.sonarrs()],
+            trending=lambda: safe(lambda: self.seerr.row_page("trending", 1)["items"], "trending", []),
+        )
+        owned = (
+            {m.get("tmdbId") for _, ms in d["radarr"] for m in ms if m.get("hasFile")},
+            {s.get("tmdbId") for so in self.sonarrs() for s in safe(so.series, so.name, [])
+             if (s.get("statistics") or {}).get("episodeFileCount")},
+        )
+        rows = []
+
+        # Continue watching / up next (Plex)
+        deck, because = [], None
+        for m in d["deck"]:
+            is_ep = m.get("type") == "episode"
+            tmdb = self.plex.show_tmdb(m.get("grandparentRatingKey")) if is_ep else self.plex.tmdb_of(m)
+            if not tmdb:
+                continue
+            dur, off = m.get("duration") or 0, m.get("viewOffset") or 0
+            left = max(0, (dur - off) // 60000)
+            title = m.get("grandparentTitle") if is_ep else m.get("title")
+            sub = join(f"S{m.get('parentIndex', 0):02d}E{m.get('index', 0):02d}" if is_ep else None,
+                       m.get("title") if is_ep else m.get("year"),
+                       f"{left}m left" if off else ("Up next" if is_ep else None))
+            deck.append(clean({
+                "key": f"plex:{m.get('ratingKey')}", "id": f"{'tv' if is_ep else 'movie'}-{tmdb}",
+                "title": title or "?", "subtitle": sub,
+                "backdrop": self.plex.art(m.get("art") or m.get("grandparentArt") or m.get("thumb")),
+                "poster": self.plex.art(m.get("grandparentThumb") if is_ep else m.get("thumb"), 342, 513),
+                "overview": m.get("summary"),
+                "progress": round(off / dur, 3) if dur and off else None,
+                "badge": "Resume" if off else "Up next", "badgeTone": "info",
+            }))
+            if because is None:
+                because = ("tv" if is_ep else "movie", tmdb, title)
+        rows.append(row("Continue watching", dedupe(deck), "landscape"))
+
+        # Recently added movies, across every Radarr
+        recent = []
+        for r, ms in d["radarr"]:
+            for m in ms:
+                if m.get("hasFile") and m.get("tmdbId"):
+                    recent.append(((m.get("movieFile") or {}).get("dateAdded") or m.get("added") or "", r, m))
+        recent.sort(key=lambda x: x[0], reverse=True)
+        movies = []
+        for _, r, m in recent:
+            c = r.card(m)
+            c.update(key=f"hub:movie-{m['tmdbId']}", id=f"movie-{m['tmdbId']}")
+            if r.inst != self.radarrs()[0].inst:
+                c["subtitle"] = join(c.get("subtitle"), r.name)
+            movies.append(c)
+        rows.append(row("Recently added movies", dedupe(movies)))
+
+        # Recently added TV episodes, grouped by show
+        eps = []
+        for s, recs in d["imports"]:
+            for h in recs:
+                se, ep = h.get("series") or {}, h.get("episode") or {}
+                if se.get("tmdbId"):
+                    eps.append((h.get("date") or "", s, se, ep))
+        eps.sort(key=lambda x: x[0], reverse=True)
+        tv = []
+        for dt, s, se, ep in eps:
+            c = s.card(se, badge=fmt_date(dt), tone="ok",
+                       subtitle=join(f"S{ep.get('seasonNumber', 0):02d}E{ep.get('episodeNumber', 0):02d}",
+                                     ep.get("title")))
+            c.update(key=f"hub:tv-{se['tmdbId']}", id=f"tv-{se['tmdbId']}")
+            tv.append(c)
+        rows.append(row("Recently added TV", dedupe(tv), "landscape"))
+
+        # Coming soon: movies + this week's episodes
+        soon = []
+        for r, cal in d["mcal"]:
+            for m in cal:
+                dates = sorted(x for x in (m.get("digitalRelease"), m.get("physicalRelease"), m.get("inCinemas"))
+                               if x and x[:10] >= today.isoformat())
+                if dates and m.get("tmdbId") and not m.get("hasFile"):
+                    c = r.card(m, badge=fmt_date(dates[0]), tone="info")
+                    c.update(key=f"hub:movie-{m['tmdbId']}", id=f"movie-{m['tmdbId']}")
+                    soon.append((dates[0], c))
+        for s, cal in d["tcal"]:
+            for e in cal:
+                se = e.get("series") or {}
+                if se.get("tmdbId"):
+                    c = s.card(se, badge=fmt_date(e.get("airDateUtc")), tone="info",
+                               subtitle=join(Sonarr.sxe(e), e.get("title")))
+                    c.update(key=f"hub:tv-{se['tmdbId']}", id=f"tv-{se['tmdbId']}")
+                    soon.append((e.get("airDateUtc") or "", c))
+        soon.sort(key=lambda x: x[0])
+        rows.append(row("Coming soon", dedupe([c for _, c in soon])))
+
+        rows.append(row("Trending", [self.mark(c, owned) for c in d["trending"]], key="trending", more=True))
+
+        if because:
+            mt, tid, title = because
+            recs = safe(lambda: self.seerr._req("GET", f"/{mt}/{tid}/recommendations", {"page": 1}).get("results"),
+                        "recommendations", [])
+            rows.append(row(f"Because you watched {title}", [self.mark(c, owned) for c in self.seerr.cards(recs, mt)]))
+
+        rows = [r for r in rows if r["items"]]
+        hero = next((i for r in rows for i in r["items"] if i.get("backdrop")), None)
+        return {"hero": hero, "rows": rows}
+
+    def search(self, q):
+        res = self.seerr.search(q)
+        owned = self.owned()
+        return {"items": [self.mark(c, owned) for c in res["items"]]}
+
+    def row_page(self, key, page=1):
+        res = self.seerr.row_page(key, page)
+        owned = self.owned()
+        res["items"] = [self.mark(c, owned) for c in res["items"]]
+        return res
+
+    # -- pages
+    def _tmdb(self, mt, tid):
+        return self.seerr.cached(f"tmdb-{mt}-{tid}", 600, lambda: self.seerr._req("GET", f"/{mt}/{tid}"))
+
+    def detail(self, item_id):
+        mt, _, tid = item_id.partition("-")
+        if mt == "person" and tid.isdigit():
+            return self.person(int(tid))
+        if mt not in ("movie", "tv") or not tid.isdigit():
+            raise ApiError("Bad item id")
+        tid = int(tid)
+        d = self._tmdb(mt, tid)
+        page = self.seerr.detail_from(mt, tid, d)
+        title = d.get("title") or d.get("name") or ""
+        owned = self.owned()
+
+        # headline facts: tagline, director/creator, ratings
+        extra = []
+        crew = (d.get("credits") or {}).get("crew") or []
+        if mt == "movie":
+            directors = [c.get("name") for c in crew if c.get("job") == "Director"]
+            extra.append(("Director", ", ".join(directors[:3])))
+        else:
+            extra.append(("Created by", ", ".join(c.get("name", "") for c in d.get("createdBy") or [])))
+        if mt == "movie":
+            rt = safe(lambda: self.seerr.cached(f"ratings-{tid}", 86400,
+                                                lambda: self.seerr._req("GET", f"/movie/{tid}/ratingscombined")),
+                      "ratings", {}) or {}
+            imdb = (rt.get("imdb") or {}).get("criticsScore")
+            rtc = (rt.get("rt") or {}).get("criticsScore")
+            extra.append(("Ratings", join(f"IMDb {imdb}" if imdb else None, f"Rotten Tomatoes {rtc}%" if rtc else None)))
+        if d.get("tagline"):
+            page["item"]["overview"] = f"“{d['tagline']}”\n\n{page['item'].get('overview') or ''}".strip()
+        page["facts"] = facts(*extra) + page["facts"]
+
+        # Plex: watched state + play
+        if self.plex:
+            user, pin = plex_user_from_request()
+            token = safe(lambda: self.plex.token_for(user, pin), "plex token", None)
+            pm = safe(lambda: self.plex.find(mt, tid, title, token), "plex search", None) if token else None
+            if pm:
+                if mt == "movie":
+                    if pm.get("viewOffset"):
+                        left = max(0, ((pm.get("duration") or 0) - pm["viewOffset"]) // 60000)
+                        state = f"In progress · {left}m left"
+                    else:
+                        state = "Watched" if pm.get("viewCount") else "Not watched"
+                else:
+                    state = f"{pm.get('viewedLeafCount', 0)} of {pm.get('leafCount', 0)} episodes watched"
+                page["facts"].insert(0, {"label": "Plex", "value": state})
+                page["actions"].insert(0, action("plex", "▶  Play in Plex", "primary", opens="plex",
+                                                 arg=f"{self.plex.machine_id()}|{pm.get('ratingKey')}"))
+
+        # trailer
+        vids = d.get("relatedVideos") or []
+        trailer = next((v for v in vids if v.get("site") == "YouTube" and v.get("type") == "Trailer"), None) \
+            or next((v for v in vids if v.get("site") == "YouTube"), None)
+        if trailer and trailer.get("key"):
+            page["actions"].append(action("trailer", "Trailer", opens="youtube", arg=trailer["key"]))
+
+        # cast + recommendations
+        cast = sorted((d.get("credits") or {}).get("cast") or [], key=lambda c: c.get("order", 999))[:24]
+        page["people"] = [clean({"id": f"person-{c['id']}", "name": c.get("name") or "?",
+                                 "role": c.get("character"), "photo": tmdb_img(c.get("profilePath"), "w185")})
+                          for c in cast if c.get("id")]
+        recs = par(
+            r=lambda: safe(lambda: self.seerr._req("GET", f"/{mt}/{tid}/recommendations", {"page": 1}).get("results"),
+                           "recommendations", []),
+            s=lambda: safe(lambda: self.seerr._req("GET", f"/{mt}/{tid}/similar", {"page": 1}).get("results"),
+                           "similar", []),
+        )
+        page["rows"] = [r for r in (
+            row("More like this", [self.mark(c, owned) for c in self.seerr.cards(recs["r"], mt)]),
+            row("Similar", [self.mark(c, owned) for c in self.seerr.cards(recs["s"], mt)]),
+        ) if r["items"]]
+        return page
+
+    def person(self, pid):
+        d = par(p=lambda: self.seerr.cached(f"person-{pid}", 3600, lambda: self.seerr._req("GET", f"/person/{pid}")),
+                c=lambda: self.seerr.cached(f"credits-{pid}", 3600,
+                                            lambda: self.seerr._req("GET", f"/person/{pid}/combined_credits")))
+        p, cr = d["p"], d["c"]
+        owned = self.owned()
+
+        def credit_cards(items):
+            items = sorted(items, key=lambda c: -(c.get("popularity") or 0))
+            out = []
+            for c in items:
+                card = self.seerr.card(c)
+                if card:
+                    if c.get("character"):
+                        card["subtitle"] = join(card.get("subtitle"), f"as {c['character']}")
+                    elif c.get("job"):
+                        card["subtitle"] = join(card.get("subtitle"), c["job"])
+                    out.append(self.mark(card, owned))
+            return dedupe(out, 60)
+
+        cast = cr.get("cast") or []
+        crew = cr.get("crew") or []
+        movies = credit_cards([c for c in cast if c.get("mediaType") == "movie"])
+        shows = credit_cards([c for c in cast if c.get("mediaType") == "tv" and (c.get("episodeCount") or 2) > 1])
+        behind = credit_cards([c for c in crew if c.get("job") in ("Director", "Screenplay", "Writer", "Creator",
+                                                                    "Producer", "Executive Producer")])
+        known = (movies + shows)[:1]
+        age = None
+        if p.get("birthday") and not p.get("deathday"):
+            b = parse_dt(p["birthday"])
+            if b:
+                age = datetime.now().year - b.year
+        item = clean({
+            "key": f"person-{pid}", "id": f"person-{pid}", "title": p.get("name") or "?",
+            "subtitle": join(p.get("knownForDepartment"), f"age {age}" if age else None, p.get("placeOfBirth")),
+            "poster": tmdb_img(p.get("profilePath"), "w342"),
+            "backdrop": known[0].get("backdrop") if known else None,
+            "overview": p.get("biography"),
+        })
+        f = facts(("Born", fmt_date(p.get("birthday"), True)), ("Died", fmt_date(p.get("deathday"), True)),
+                  ("Place of birth", p.get("placeOfBirth")), ("Known for", p.get("knownForDepartment")),
+                  ("In your library", sum(1 for c in movies + shows if c.get("badge") == "In library") or None))
+        rows = [r for r in (row("Movies", movies), row("TV", shows), row("Behind the camera", behind)) if r["items"]]
+        return {"item": item, "facts": f, "actions": [], "rows": rows}
+
+    def act(self, item_id, act, arg=None, choice=None):
+        res = self.seerr.act(item_id, act, arg, choice)
+        self.drop_home()
+        return res
 
 
 # ---------------------------------------------------------------- File Station
@@ -1362,7 +1831,8 @@ def downloads_snapshot():
 # ---------------------------------------------------------------- wiring
 
 def init():
-    global CFG, FILES
+    global CFG, FILES, HUB, PLEX
+    HUB = None
     CFG = load_config()
     SERVICES.clear()
     CLIENTS.clear()
@@ -1377,6 +1847,16 @@ def init():
         s = Seerr(c)
         SERVICES[(s.kind, s.inst)] = s
     FILES = FileStation(CFG["filestation"]) if CFG.get("filestation") else None
+    PLEX = Plex(CFG["plex"]) if (CFG.get("plex") or {}).get("token") else None
+    seerrs = [x for x in SERVICES.values() if isinstance(x, Seerr)]
+    hub_conf = CFG.get("hub", {})
+    HUB = Hub(hub_conf if isinstance(hub_conf, dict) else {}, seerrs[0], PLEX) \
+        if seerrs and hub_conf is not False else None
+    if HUB:  # Home goes first in the menu
+        items = list(SERVICES.items())
+        SERVICES.clear()
+        SERVICES[(HUB.kind, HUB.inst)] = HUB
+        SERVICES.update(items)
     for key, cls in (("nzbget", NzbGet), ("qbittorrent", QBittorrent)):
         conf = CFG.get(key)
         for c in (conf if isinstance(conf, list) else [conf] if conf else []):
@@ -1474,6 +1954,7 @@ def config():
                    services=[s.info() for s in SERVICES.values()],
                    files=FILES is not None,
                    downloads=bool(CLIENTS),
+                   plex=PLEX is not None,
                    repo=CFG.get("github_repo") or DEFAULT_REPO)
 
 
@@ -1493,7 +1974,31 @@ def app_log():
 
 @app.get("/api/svc/<kind>/<inst>/home")
 def svc_home(kind, inst):
-    return jsonify(svc(kind, inst).home_cached())
+    s = svc(kind, inst)
+    if isinstance(s, Hub):
+        return jsonify(s.home_cached(*plex_user_from_request()))
+    return jsonify(s.home_cached())
+
+
+@app.get("/api/plex/users")
+def plex_users():
+    if not PLEX:
+        raise ApiError("Plex isn't configured", 404)
+    return jsonify(users=[{k: u[k] for k in ("id", "title", "thumb", "protected")} for u in PLEX.users()])
+
+
+@app.get("/plexart")
+def plexart():
+    if not PLEX:
+        return Response(status=404)
+    w, h = int(request.args.get("w", 640)), int(request.args.get("h", 360))
+    r = requests.get(f"{PLEX.url}/photo/:/transcode", params={
+        "width": w, "height": h, "minSize": 1, "upscale": 1, "url": request.args.get("p", ""),
+        "X-Plex-Token": PLEX.token}, timeout=30)
+    if r.status_code >= 400:
+        return Response(status=404)
+    return Response(r.content, mimetype=r.headers.get("Content-Type", "image/jpeg"),
+                    headers={"Cache-Control": "public, max-age=86400"})
 
 
 @app.get("/api/svc/<kind>/<inst>/search")

@@ -14,6 +14,7 @@ CFG = {
                {"id": "radarr-truehd", "name": "Movies 4K", "url": "http://nas:7879", "api_key": "rk4", "icon": "4k"}],
     "sonarr": [{"id": "sonarr", "name": "TV", "url": "http://nas:8989", "api_key": "sk"}],
     "seerr": {"url": "http://nas:5055", "api_key": "ok", "four_k": True},
+    "plex": {"url": "http://nas:32400", "token": "admintok"},
     "filestation": {"url": "http://nas:5000", "username": "u", "password": "p",
                     "allowed_shares": ["/video", "/downloads"]},
 }
@@ -66,7 +67,7 @@ def test_auth(client):
     assert client.get("/").status_code == 200
     assert client.get("/api/config").status_code == 401
     r = client.get("/api/config", headers=H).get_json()
-    assert [s["inst"] for s in r["services"]] == ["radarr", "radarr-truehd", "sonarr", "seerr"]
+    assert [s["inst"] for s in r["services"]] == ["hub", "radarr", "radarr-truehd", "sonarr", "seerr"]
     assert r["files"] is True
 
 
@@ -487,3 +488,102 @@ def test_seerr_row_paging(client):
     assert "page=2" in responses.calls[-1].request.url
     assert client.get("/api/svc/seerr/seerr/row?key=nope", headers=H).status_code == 400
     assert client.get("/api/svc/radarr/radarr/row?key=movies", headers=H).status_code == 400
+
+
+# ---------------------------------------------------------------- hub + plex
+
+USERS_XML = b"""<MediaContainer><User id="1" title="Matt" admin="1" protected="0"/>
+<User id="22" title="Kids" admin="0" protected="1" thumb="https://plex.tv/k.png"/></MediaContainer>"""
+
+
+def plex_common():
+    responses.get("http://nas:32400/identity", json={"MediaContainer": {"machineIdentifier": "MID"}})
+    responses.get("https://plex.tv/api/home/users", body=USERS_XML)
+
+
+@responses.activate
+def test_plex_users_and_switch(client):
+    plex_common()
+    r = client.get("/api/plex/users", headers=H).get_json()
+    assert [u["title"] for u in r["users"]] == ["Matt", "Kids"] and r["users"][1]["protected"] is True
+    responses.post("https://plex.tv/api/home/users/22/switch", body=b'<user authenticationToken="kidtok"/>')
+    responses.get("https://plex.tv/api/v2/resources", json=[{"clientIdentifier": "MID", "accessToken": "kidserver"}])
+    assert gw.PLEX.token_for("Kids", "1234") == "kidserver"
+    assert any("switch?pin=1234" in c.request.url for c in responses.calls)
+    assert gw.PLEX.token_for("1") == "admintok"  # admin uses the configured token
+
+
+@responses.activate
+def test_hub_home(client):
+    plex_common()
+    responses.get("http://nas:32400/library/onDeck", json={"MediaContainer": {"Metadata": [
+        {"type": "episode", "ratingKey": "9", "grandparentRatingKey": "5", "grandparentTitle": "Severance",
+         "title": "Hello", "parentIndex": 2, "index": 3, "viewOffset": 600000, "duration": 3000000,
+         "art": "/library/metadata/5/art/1"},
+        {"type": "movie", "ratingKey": "7", "title": "Dune", "year": 2021, "Guid": [{"id": "tmdb://438631"}]}]}})
+    responses.get("http://nas:32400/library/metadata/5", json={"MediaContainer": {"Metadata": [
+        {"Guid": [{"id": "imdb://tt1"}, {"id": "tmdb://95396"}]}]}})
+    m = dict(MOVIES[1], tmdbId=438631)
+    responses.get("http://nas:7878/api/v3/movie", json=[m])
+    responses.get("http://nas:7879/api/v3/movie", json=[])
+    responses.get("http://nas:7878/api/v3/calendar", json=[])
+    responses.get("http://nas:7879/api/v3/calendar", json=[])
+    responses.get("http://nas:8989/api/v3/series", json=[dict(SERIES[0], tmdbId=95396)])
+    responses.get("http://nas:8989/api/v3/history", json={"records": [
+        {"date": iso(now), "series": dict(SERIES[0], tmdbId=95396), "episode": {"seasonNumber": 2, "episodeNumber": 3}}]})
+    responses.get("http://nas:8989/api/v3/calendar", json=[])
+    responses.get("http://nas:5055/api/v1/discover/trending", json={"totalPages": 5, "results": [
+        {"id": 438631, "mediaType": "movie", "title": "Dune", "posterPath": "/d.jpg"}]})
+    responses.get("http://nas:5055/api/v1/tv/95396/recommendations", json={"results": [
+        {"id": 1, "mediaType": "tv", "name": "Rec"}]})
+    page = client.get("/api/svc/hub/hub/home", headers=H).get_json()
+    titles = [r["title"] for r in page["rows"]]
+    assert titles == ["Continue watching", "Recently added movies", "Recently added TV", "Trending",
+                      "Because you watched Severance"]
+    cw = page["rows"][0]["items"]
+    assert cw[0]["id"] == "tv-95396" and cw[0]["progress"] == 0.2 and "40m left" in cw[0]["subtitle"]
+    assert cw[0]["backdrop"].startswith("/plexart?") and cw[1]["id"] == "movie-438631"
+    assert page["rows"][1]["items"][0]["id"] == "movie-438631"
+    assert page["rows"][3]["items"][0]["badge"] == "In library" and page["rows"][3]["key"] == "trending"
+
+
+@responses.activate
+def test_hub_title_and_person(client):
+    plex_common()
+    responses.get("http://nas:5055/api/v1/movie/438631", json={
+        "id": 438631, "title": "Dune", "tagline": "Beyond fear", "overview": "Spice.",
+        "mediaInfo": {"id": 3, "status": 5},
+        "credits": {"cast": [{"id": 10, "name": "Timothée", "character": "Paul", "profilePath": "/t.jpg", "order": 0}],
+                    "crew": [{"name": "Denis", "job": "Director"}]},
+        "relatedVideos": [{"site": "YouTube", "type": "Trailer", "key": "abc"}]})
+    responses.get("http://nas:5055/api/v1/movie/438631/ratingscombined",
+                  json={"imdb": {"criticsScore": 8.0}, "rt": {"criticsScore": 83}})
+    responses.get("http://nas:5055/api/v1/movie/438631/recommendations", json={"results": [
+        {"id": 2, "mediaType": "movie", "title": "Arrival"}]})
+    responses.get("http://nas:5055/api/v1/movie/438631/similar", json={"results": []})
+    responses.get("http://nas:5055/api/v1/service/radarr", json=[])
+    responses.get("http://nas:7878/api/v3/movie", json=[])
+    responses.get("http://nas:7879/api/v3/movie", json=[])
+    responses.get("http://nas:8989/api/v3/series", json=[])
+    responses.get("http://nas:32400/hubs/search", json={"MediaContainer": {"Hub": [{"Metadata": [
+        {"type": "movie", "ratingKey": "7", "viewCount": 1, "Guid": [{"id": "tmdb://438631"}]}]}]}})
+    d = client.get("/api/svc/hub/hub/item/movie-438631", headers=H).get_json()
+    f = {x["label"]: x["value"] for x in d["facts"]}
+    assert f["Plex"] == "Watched" and f["Director"] == "Denis" and "Rotten Tomatoes 83%" in f["Ratings"]
+    ids = [a["id"] for a in d["actions"]]
+    assert ids[0] == "plex" and d["actions"][0]["arg"] == "MID|7" and "trailer" in ids and "clear" in ids
+    assert d["people"][0] == {"id": "person-10", "name": "Timothée", "role": "Paul",
+                              "photo": "https://image.tmdb.org/t/p/w185/t.jpg"}
+    assert d["rows"][0]["title"] == "More like this" and d["item"]["overview"].startswith("“Beyond fear”")
+    # Jellyseerr's own page now gets the same rich detail
+    assert client.get("/api/svc/seerr/seerr/item/movie-438631", headers=H).get_json()["people"]
+
+    responses.get("http://nas:5055/api/v1/person/10", json={"name": "Timothée", "birthday": "1995-12-27",
+                                                            "biography": "Actor.", "knownForDepartment": "Acting"})
+    responses.get("http://nas:5055/api/v1/person/10/combined_credits", json={"cast": [
+        {"id": 438631, "mediaType": "movie", "title": "Dune", "character": "Paul", "popularity": 90},
+        {"id": 5, "mediaType": "tv", "name": "Homeland", "character": "Finn", "episodeCount": 8, "popularity": 5}],
+        "crew": []})
+    p = client.get("/api/svc/hub/hub/item/person-10", headers=H).get_json()
+    assert p["item"]["title"] == "Timothée" and [r["title"] for r in p["rows"]] == ["Movies", "TV"]
+    assert p["rows"][0]["items"][0]["subtitle"].endswith("as Paul")

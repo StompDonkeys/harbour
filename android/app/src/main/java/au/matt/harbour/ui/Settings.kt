@@ -30,6 +30,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import au.matt.harbour.data.Gateway
+import au.matt.harbour.data.PlexUser
+import au.matt.harbour.data.plexUsers
 import au.matt.harbour.data.UpdateInfo
 import au.matt.harbour.data.Updater
 import au.matt.harbour.data.config
@@ -44,6 +46,10 @@ fun SettingsScreen(
     repo: String = "StompDonkeys/harbour",
     update: UpdateInfo? = null,
     onUpdateFound: (UpdateInfo?) -> Unit = {},
+    plexEnabled: Boolean = false,
+    gateway: Gateway? = null,
+    plexName: String = "",
+    onPlexProfile: (id: String, name: String, pin: String) -> Unit = { _, _, _ -> },
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -56,6 +62,9 @@ fun SettingsScreen(
     var updBusy by remember { mutableStateOf(false) }
     val first = remember { FocusRequester() }
     val version = remember { Updater.installedVersionName(context) }
+    var plexUsers by remember { mutableStateOf<List<PlexUser>?>(null) }
+    var pinFor by remember { mutableStateOf<PlexUser?>(null) }
+    var plexStatus by remember { mutableStateOf<String?>(null) }
 
     val installUpdate: (UpdateInfo) -> Unit = { info ->
         if (!Updater.canInstall(context)) {
@@ -126,6 +135,25 @@ fun SettingsScreen(
             Text((if (ok) "✓ " else "✗ ") + msg, color = if (ok) HColors.Ok else HColors.Danger, fontSize = 15.sp)
         }
 
+        if (!firstRun && plexEnabled && gateway != null) {
+            Spacer(Modifier.height(10.dp))
+            Text("Plex", color = HColors.Text, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+            SettingRow("Plex profile", plexName.ifBlank { "Owner account" }, null) {
+                plexStatus = "Loading Plex Home profiles…"
+                scope.launch {
+                    try {
+                        plexUsers = gateway.plexUsers().users
+                        plexStatus = null
+                    } catch (e: Exception) {
+                        plexStatus = "⚠ ${e.message}"
+                    }
+                }
+            }
+            Text("Home's Continue watching and watched badges follow this profile.",
+                color = HColors.TextDim, fontSize = 13.sp)
+            plexStatus?.let { Text(it, color = HColors.TextDim, fontSize = 14.sp) }
+        }
+
         if (!firstRun) {
             Spacer(Modifier.height(10.dp))
             Text("Updates", color = HColors.Text, fontSize = 20.sp, fontWeight = FontWeight.Bold)
@@ -156,6 +184,35 @@ fun SettingsScreen(
                 Text(it, color = HColors.TextDim, fontSize = 14.sp, modifier = Modifier.widthIn(max = 640.dp))
             }
         }
+    }
+
+    plexUsers?.let { users ->
+        MenuDialog(
+            title = "Whose Plex history should Harbour follow?",
+            items = listOf("Owner account" to null) + users.map { (it.title + if (it.protected) "  🔒" else "") to null },
+            onPick = { i ->
+                plexUsers = null
+                if (i == 0) {
+                    onPlexProfile("", "", "")
+                } else {
+                    val u = users[i - 1]
+                    if (u.protected) pinFor = u else onPlexProfile(u.id, u.title, "")
+                }
+            },
+            onDismiss = { plexUsers = null },
+        )
+    }
+    pinFor?.let { u ->
+        TextInputDialog(
+            title = "PIN for ${u.title}",
+            initial = "",
+            password = true,
+            onDone = {
+                pinFor = null
+                if (it.isNotBlank()) onPlexProfile(u.id, u.title, it.trim())
+            },
+            onDismiss = { pinFor = null },
+        )
     }
 
     when (editing) {

@@ -15,6 +15,10 @@
     "id": "seerr", "name": "Jellyseerr", "url": "http://192.168.4.68:5055", "api_key": "SEERR_API_KEY"
   },
 
+  "plex": {
+    "url": "http://192.168.4.68:32400", "token": "YOUR_PLEX_TOKEN"
+  },
+
   "nzbget": {
     "name": "NZBGet", "url": "http://192.168.4.68:6789", "username": "nzbget", "password": "NZBGET_PASSWORD"
   },

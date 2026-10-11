@@ -30,7 +30,8 @@ data class ServiceInfo(
     val icon: String? = null,
 ) {
     val key: String get() = "$kind/$inst"
-    val isDiscover: Boolean get() = kind == "seerr"
+    /** Discovery-style tabs (no A–Z library list). */
+    val isDiscover: Boolean get() = kind == "seerr" || kind == "hub"
 }
 
 @Serializable
@@ -39,6 +40,7 @@ data class GatewayConfig(
     val services: List<ServiceInfo> = emptyList(),
     val files: Boolean = false,
     val downloads: Boolean = false,
+    val plex: Boolean = false,
     val repo: String = "StompDonkeys/harbour",
     val version: String = "",
 )
@@ -122,12 +124,30 @@ data class Season(
 )
 
 @Serializable
+data class Person(
+    val id: String,
+    val name: String,
+    val role: String? = null,
+    val photo: String? = null,
+)
+
+@Serializable
 data class Detail(
     val item: MediaItem,
     val facts: List<Fact> = emptyList(),
     val actions: List<ActionDef> = emptyList(),
     val seasons: List<Season> = emptyList(),
+    /** Cast, shown as round photos; each opens that person's page. */
+    val people: List<Person> = emptyList(),
+    /** Extra rows like "More like this" or a person's filmography. */
+    val rows: List<MediaRow> = emptyList(),
 )
+
+@Serializable
+data class PlexUser(val id: String, val title: String, val thumb: String? = null, val protected: Boolean = false)
+
+@Serializable
+data class PlexUsers(val users: List<PlexUser> = emptyList())
 
 @Serializable
 data class ActionResult(
@@ -214,7 +234,7 @@ data class FileListing(
 
 class GatewayException(message: String) : Exception(message)
 
-class Gateway(baseUrl: String, val token: String) {
+class Gateway(baseUrl: String, val token: String, val plexUser: String = "", val plexPin: String = "") {
     val base: String = baseUrl.trim().trimEnd('/').let {
         if (it.startsWith("http://") || it.startsWith("https://")) it else "http://$it"
     }
@@ -242,6 +262,10 @@ class Gateway(baseUrl: String, val token: String) {
             val req = Request.Builder()
                 .url(base + path)
                 .header("X-Token", token)
+                .apply {
+                    if (plexUser.isNotBlank()) header("X-Plex-User", plexUser)
+                    if (plexPin.isNotBlank()) header("X-Plex-Pin", plexPin)
+                }
                 .method(method, rb)
                 .build()
             try {
@@ -310,6 +334,8 @@ suspend fun Gateway.grab(s: ServiceInfo, id: String, r: Release): ActionResult =
 
 suspend fun Gateway.downloads(): Downloads = get("/api/downloads")
 
+suspend fun Gateway.plexUsers(): PlexUsers = get("/api/plex/users")
+
 suspend fun Gateway.downloadAction(client: String, id: String?, action: String): ActionResult =
     post("/api/downloads/action", buildJsonObject {
         put("client", client)
@@ -350,4 +376,13 @@ class Prefs(context: Context) {
     var token: String
         get() = sp.getString("token", "").orEmpty()
         set(v) { sp.edit().putString("token", v).apply() }
+    var plexUser: String
+        get() = sp.getString("plexUser", "").orEmpty()
+        set(v) { sp.edit().putString("plexUser", v).apply() }
+    var plexUserName: String
+        get() = sp.getString("plexUserName", "").orEmpty()
+        set(v) { sp.edit().putString("plexUserName", v).apply() }
+    var plexPin: String
+        get() = sp.getString("plexPin", "").orEmpty()
+        set(v) { sp.edit().putString("plexPin", v).apply() }
 }
