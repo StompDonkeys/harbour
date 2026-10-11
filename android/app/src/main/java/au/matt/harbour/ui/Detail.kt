@@ -120,9 +120,10 @@ fun DetailScreen(
             a.opens == "releases" -> onOpenReleases(a.arg, detail?.item?.title ?: "")
             a.opens == "item" && a.arg != null -> onOpenItem(a.arg)
             a.opens == "youtube" && a.arg != null -> {
-                if (!openExternal(context, "vnd.youtube:${a.arg}") &&
-                    !openExternal(context, "https://www.youtube.com/watch?v=${a.arg}")
-                ) toaster.show("Couldn't open YouTube — is the YouTube app installed?")
+                // A plain watch link works with YouTube *and* SmartTube; vnd.youtube: is the fallback.
+                if (!openExternal(context, "https://www.youtube.com/watch?v=${a.arg}") &&
+                    !openExternal(context, "vnd.youtube:${a.arg}")
+                ) toaster.show("Couldn't open a YouTube app — install YouTube or SmartTube")
             }
             a.opens == "plex" && a.arg != null -> {
                 val (machine, key) = a.arg.split("|", limit = 2).let { it[0] to it.getOrElse(1) { "" } }
