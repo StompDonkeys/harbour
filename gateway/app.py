@@ -109,8 +109,12 @@ def daily_rng(salt):
     return random.Random(datetime.now().toordinal() * 1000 + sum(map(ord, salt)))
 
 
-def row(title, items, style="poster"):
-    return {"title": title, "style": style, "items": items}
+def row(title, items, style="poster", key=None, more=False):
+    """A row of cards. `key` + `more` let the app page in further items for this row."""
+    r = {"title": title, "style": style, "items": items}
+    if key:
+        r.update(key=key, more=more)
+    return r
 
 
 def action(id_, label, style=None, confirm=None, arg=None, opens=None, choose=None):
@@ -843,18 +847,30 @@ class Seerr(HomeCache):
     def cards(self, results, mt=None):
         return dedupe([c for c in (self.card(r, mt) for r in results or []) if c], 40)
 
+    # Discovery rows: key -> (title, Seerr path, media type)
+    ROWS = {
+        "trending": ("Trending", "/discover/trending", None),
+        "movies": ("Popular movies", "/discover/movies", "movie"),
+        "tv": ("Popular TV", "/discover/tv", "tv"),
+        "movies-upcoming": ("Upcoming movies", "/discover/movies/upcoming", "movie"),
+        "tv-upcoming": ("Upcoming TV", "/discover/tv/upcoming", "tv"),
+    }
+
+    def row_page(self, key, page=1):
+        if key not in self.ROWS:
+            raise ApiError("Unknown row")
+        _, path, mt = self.ROWS[key]
+        page = max(1, int(page or 1))
+        res = self._req("GET", path, {"page": page})
+        total = int(res.get("totalPages") or page)
+        return {"items": self.cards(res.get("results"), mt), "page": page, "hasMore": page < min(total, 500)}
+
     def home(self):
-        sources = [("Trending", "/discover/trending", None),
-                   ("Popular movies", "/discover/movies", "movie"),
-                   ("Popular TV", "/discover/tv", "tv"),
-                   ("Upcoming movies", "/discover/movies/upcoming", "movie"),
-                   ("Upcoming TV", "/discover/tv/upcoming", "tv")]
+        def fetch(key):
+            return lambda: safe(lambda: self.row_page(key, 1), self.ROWS[key][0], {"items": [], "hasMore": False})
 
-        def fetch(path, mt, title):
-            return lambda: safe(lambda: self.cards(self._req("GET", path, {"page": 1}).get("results"), mt), title, [])
-
-        got = par(**{f"r{i}": fetch(p, mt, t) for i, (t, p, mt) in enumerate(sources)})
-        rows = [row(t, got[f"r{i}"]) for i, (t, _, _) in enumerate(sources)]
+        got = par(**{k: fetch(k) for k in self.ROWS})
+        rows = [row(self.ROWS[k][0], got[k]["items"], key=k, more=got[k]["hasMore"]) for k in self.ROWS]
         rows = [r for r in rows if r["items"]]
         hero = next((i for r in rows for i in r["items"] if i.get("backdrop")), None)
         return {"hero": hero, "rows": rows}
@@ -1483,6 +1499,14 @@ def svc_home(kind, inst):
 @app.get("/api/svc/<kind>/<inst>/search")
 def svc_search(kind, inst):
     return jsonify(svc(kind, inst).search(request.args.get("q", "")))
+
+
+@app.get("/api/svc/<kind>/<inst>/row")
+def svc_row(kind, inst):
+    s = svc(kind, inst)
+    if not hasattr(s, "row_page"):
+        raise ApiError("This row can't be expanded")
+    return jsonify(s.row_page(request.args.get("key", ""), request.args.get("page", 1)))
 
 
 @app.get("/api/svc/<kind>/<inst>/item/<item_id>")

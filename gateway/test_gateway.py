@@ -171,6 +171,7 @@ def test_seerr(client):
     responses.get("http://nas:5055/api/v1/discover/tv/upcoming", json={"results": []})
     page = client.get("/api/svc/seerr/seerr/home", headers=H).get_json()
     assert [r["title"] for r in page["rows"]] == ["Trending", "Popular movies", "Popular TV"]
+    assert [r["key"] for r in page["rows"]] == ["trending", "movies", "tv"]
     t = page["rows"][0]["items"]
     assert len(t) == 1 and t[0]["id"] == "movie-10" and t[0]["badge"] == "Available"
     assert t[0]["subtitle"] == "2025 · Movie · ★ 7.2" or t[0]["subtitle"] == "2025 · Movie · ★ 7.3"
@@ -475,3 +476,14 @@ def test_seerr_library_facts_and_clear(client):
     r = client.post("/api/svc/seerr/seerr/item/movie-777/action", json={"action": "clear"}, headers=H).get_json()
     assert r["message"] == "Cleared from Discover"
     assert responses.calls[-1].request.method == "DELETE"
+
+
+@responses.activate
+def test_seerr_row_paging(client):
+    responses.get("http://nas:5055/api/v1/discover/movies",
+                  json={"page": 2, "totalPages": 3, "results": [{"id": 30, "title": "P2", "mediaType": "movie"}]})
+    r = client.get("/api/svc/seerr/seerr/row?key=movies&page=2", headers=H).get_json()
+    assert r == {"items": [r["items"][0]], "page": 2, "hasMore": True} and r["items"][0]["id"] == "movie-30"
+    assert "page=2" in responses.calls[-1].request.url
+    assert client.get("/api/svc/seerr/seerr/row?key=nope", headers=H).status_code == 400
+    assert client.get("/api/svc/radarr/radarr/row?key=movies", headers=H).status_code == 400

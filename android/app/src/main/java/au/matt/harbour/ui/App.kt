@@ -1,5 +1,6 @@
 package au.matt.harbour.ui
 
+import android.view.KeyEvent as AndroidKeyEvent
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.foundation.Image
@@ -37,6 +38,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusProperties
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
@@ -63,6 +68,7 @@ sealed interface Screen {
     data class Library(val svc: ServiceInfo) : Screen
     data class Detail(val svc: ServiceInfo, val itemId: String) : Screen
     data class Browse(val svc: ServiceInfo, val searchFirst: Boolean) : Screen
+    data class Category(val svc: ServiceInfo, val key: String, val title: String) : Screen
     data class Releases(val svc: ServiceInfo, val itemId: String, val arg: String?, val title: String) : Screen
     data object Downloads : Screen
     data object Files : Screen
@@ -183,13 +189,22 @@ private fun MainShell(config: GatewayConfig, settings: @Composable () -> Unit, u
     val stack = remember { mutableStateListOf(tabs[0].root) }
     val railRequesters = remember(tabs) { tabs.map { FocusRequester() } }
     var railFocused by remember { mutableStateOf(false) }
+    // After you pick a tab the menu folds away straight away, even while focus is still on it,
+    // and only opens again once you move around in it (or come back to it with Left/Back).
+    var railFolded by remember { mutableStateOf(false) }
+    val contentFocus = remember { FocusRequester() }
     val holder = rememberSaveableStateHolder()
 
     fun selectTab(i: Int) {
-        if (i == tabIndex && stack.size == 1) return
-        tabIndex = i
-        stack.clear()
-        stack.add(tabs[i].root)
+        railFolded = true
+        if (i != tabIndex || stack.size != 1) {
+            tabIndex = i
+            stack.clear()
+            stack.add(tabs[i].root)
+        }
+        // Hand focus to the page if it already has something focusable; pages that are still
+        // loading grab focus themselves once they're ready.
+        runCatching { contentFocus.requestFocus() }
     }
 
     fun push(s: Screen) = stack.add(s)
@@ -204,6 +219,7 @@ private fun MainShell(config: GatewayConfig, settings: @Composable () -> Unit, u
     // from the menu, Back leaves the app.
     BackHandler(enabled = stack.size > 1) { pop() }
     BackHandler(enabled = stack.size == 1 && !railFocused) {
+        railFolded = false
         runCatching { railRequesters[tabIndex].requestFocus() }
     }
 
@@ -211,7 +227,9 @@ private fun MainShell(config: GatewayConfig, settings: @Composable () -> Unit, u
         Box(
             Modifier
                 .fillMaxSize()
-                .padding(start = RailCollapsed),
+                .padding(start = RailCollapsed)
+                .focusRequester(contentFocus)
+                .focusGroup(),
         ) {
             val index = stack.lastIndex
             val screen = stack.last()
@@ -225,6 +243,13 @@ private fun MainShell(config: GatewayConfig, settings: @Composable () -> Unit, u
                             svc = screen.svc,
                             onOpen = { id -> push(Screen.Detail(screen.svc, id)) },
                             onBrowse = { search -> push(Screen.Browse(screen.svc, search)) },
+                            onSeeAll = { key, title -> push(Screen.Category(screen.svc, key, title)) },
+                        )
+                        is Screen.Category -> CategoryScreen(
+                            svc = screen.svc,
+                            key = screen.key,
+                            title = screen.title,
+                            onOpen = { id -> push(Screen.Detail(screen.svc, id)) },
                         )
                         is Screen.Detail -> DetailScreen(
                             svc = screen.svc,
@@ -265,7 +290,12 @@ private fun MainShell(config: GatewayConfig, settings: @Composable () -> Unit, u
             selected = tabIndex,
             requesters = railRequesters,
             onSelect = { selectTab(it) },
-            onFocusChanged = { railFocused = it },
+            onFocusChanged = {
+                railFocused = it
+                if (!it) railFolded = false
+            },
+            folded = railFolded,
+            onMove = { railFolded = false },
             dotOn = if (updateAvailable) tabs.lastIndex else -1,
             modifier = Modifier.zIndex(2f),
         )
@@ -281,10 +311,13 @@ private fun NavRail(
     requesters: List<FocusRequester>,
     onSelect: (Int) -> Unit,
     onFocusChanged: (Boolean) -> Unit,
+    folded: Boolean,
+    onMove: () -> Unit,
     dotOn: Int,
     modifier: Modifier = Modifier,
 ) {
-    var expanded by remember { mutableStateOf(false) }
+    var hasFocus by remember { mutableStateOf(false) }
+    val expanded = hasFocus && !folded
     val width by animateDpAsState(if (expanded) RailExpanded else RailCollapsed, label = "rail")
     Column(
         modifier
@@ -297,8 +330,16 @@ private fun NavRail(
                 ),
             )
             .onFocusChanged {
-                expanded = it.hasFocus
+                hasFocus = it.hasFocus
                 onFocusChanged(it.hasFocus)
+            }
+            .onPreviewKeyEvent { e ->
+                // Moving up/down the menu means you're using it: open it up.
+                val code = e.nativeKeyEvent.keyCode
+                if (e.type == KeyEventType.KeyDown &&
+                    (code == AndroidKeyEvent.KEYCODE_DPAD_UP || code == AndroidKeyEvent.KEYCODE_DPAD_DOWN)
+                ) onMove()
+                false
             }
             // Entering the menu always lands on the current tab.
             .focusProperties { enter = { requesters[selected] } }

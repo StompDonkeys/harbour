@@ -62,6 +62,16 @@ data class MediaRow(
     val title: String,
     val style: String = "poster",
     val items: List<MediaItem> = emptyList(),
+    /** Set on rows that can load more pages (Jellyseerr discovery). */
+    val key: String? = null,
+    val more: Boolean = false,
+)
+
+@Serializable
+data class RowPage(
+    val items: List<MediaItem> = emptyList(),
+    val page: Int = 1,
+    val hasMore: Boolean = false,
 )
 
 @Serializable
@@ -272,6 +282,9 @@ class Gateway(baseUrl: String, val token: String) {
 suspend fun Gateway.config(): GatewayConfig = get("/api/config")
 
 suspend fun Gateway.home(s: ServiceInfo): HomePage = get("/api/svc/${s.kind}/${s.inst}/home")
+
+suspend fun Gateway.rowPage(s: ServiceInfo, key: String, page: Int): RowPage =
+    get("/api/svc/${s.kind}/${s.inst}/row?key=${Gateway.enc(key)}&page=$page")
 
 suspend fun Gateway.detail(s: ServiceInfo, id: String): Detail =
     get("/api/svc/${s.kind}/${s.inst}/item/${Gateway.enc(id)}")
