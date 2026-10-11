@@ -127,8 +127,14 @@ fun DetailScreen(
             }
             a.opens == "plex" && a.arg != null -> {
                 val (machine, key) = a.arg.split("|", limit = 2).let { it[0] to it.getOrElse(1) { "" } }
-                val deep = "plex://server://$machine/com.plexapp.plugins.library/library/metadata/$key"
-                if (!openExternal(context, deep, PLEX_PACKAGE) && !launchApp(context, PLEX_PACKAGE)) {
+                // Plex has no documented deep links; try the community-reported play link first,
+                // then the older server:// form, then just open the app.
+                val play = "plex://play/?metadataKey=%2Flibrary%2Fmetadata%2F$key&server=$machine"
+                val legacy = "plex://server://$machine/com.plexapp.plugins.library/library/metadata/$key"
+                if (!openExternal(context, play, PLEX_PACKAGE) &&
+                    !openExternal(context, legacy, PLEX_PACKAGE) &&
+                    !launchApp(context, PLEX_PACKAGE)
+                ) {
                     toaster.show("Couldn't open Plex — is the Plex app installed?")
                 }
             }
