@@ -115,15 +115,18 @@ fun GlassPanel(
                 ImageRequest.Builder(context).data(backdrop).size(640, 360)
                     .transformations(BlurTransformation()).crossfade(true).build()
             }
-            AsyncImage(
-                model = req,
-                contentDescription = null,
-                contentScale = ContentScale.Crop,
-                modifier = Modifier
-                    .wrapContentSize(Alignment.TopStart, unbounded = true)
-                    .offset { IntOffset(-origin.x.roundToInt(), -origin.y.roundToInt()) }
-                    .requiredSize(config.screenWidthDp.dp, config.screenHeightDp.dp),
-            )
+            // matchParentSize: the blurred art fills the panel but never decides its size.
+            Box(Modifier.matchParentSize()) {
+                AsyncImage(
+                    model = req,
+                    contentDescription = null,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier
+                        .wrapContentSize(Alignment.TopStart, unbounded = true)
+                        .offset { IntOffset(-origin.x.roundToInt(), -origin.y.roundToInt()) }
+                        .requiredSize(config.screenWidthDp.dp, config.screenHeightDp.dp),
+                )
+            }
         }
         Box(Modifier.matchParentSize().background(tint))
         content()
