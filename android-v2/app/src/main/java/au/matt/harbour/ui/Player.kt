@@ -231,7 +231,7 @@ fun PlayerScreen(ref: String, onExit: () -> Unit) {
         when {
             picker != null -> picker = null
             options -> options = false
-            controls && playing -> controls = false
+            controls -> controls = false
             else -> onExit()
         }
     }
@@ -255,6 +255,10 @@ fun PlayerScreen(ref: String, onExit: () -> Unit) {
             .onPreviewKeyEvent { e ->
                 if (e.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
                 val code = e.nativeKeyEvent.keyCode
+                // Back belongs to the BackHandler: hide the overlay first, then leave the player.
+                if (code == AndroidKeyEvent.KEYCODE_BACK || code == AndroidKeyEvent.KEYCODE_ESCAPE) {
+                    return@onPreviewKeyEvent false
+                }
                 val fast = e.nativeKeyEvent.repeatCount > 3
                 poke++
                 when {
