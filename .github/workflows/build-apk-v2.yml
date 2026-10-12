@@ -46,7 +46,12 @@ jobs:
           fi
 
       - name: Build
-        run: gradle assembleRelease --no-daemon --stacktrace
+        run: |
+          set -o pipefail
+          if ! gradle assembleRelease --no-daemon --stacktrace 2>&1 | tee build.log; then
+            grep -E "^e: " build.log | head -30 | while read -r l; do echo "::error::$l"; done
+            exit 1
+          fi
 
       - name: Collect APK
         run: |
