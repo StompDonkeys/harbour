@@ -587,3 +587,76 @@ def test_hub_title_and_person(client):
     p = client.get("/api/svc/hub/hub/item/person-10", headers=H).get_json()
     assert p["item"]["title"] == "Timothée" and [r["title"] for r in p["rows"]] == ["Movies", "TV"]
     assert p["rows"][0]["items"][0]["subtitle"].endswith("as Paul")
+
+
+# ---------------------------------------------------------------- v2 playback
+
+def _meta(rk, **kw):
+    return {"MediaContainer": {"Metadata": [dict({"ratingKey": rk}, **kw)]}}
+
+
+@responses.activate
+def test_play_episode_resume_and_next(client):
+    plex_common()
+    responses.get("http://nas:32400/library/metadata/9", json=_meta(
+        "9", type="episode", grandparentRatingKey="5", grandparentTitle="Severance", title="Hello",
+        parentIndex=2, index=3, viewOffset=600000, duration=3000000,
+        Media=[{"videoResolution": "4k", "videoDynamicRange": "Dolby Vision", "audioCodec": "truehd",
+                "Part": [{"key": "/library/parts/77/123/file.mkv"}]}]))
+    responses.get("http://nas:32400/library/metadata/5/allLeaves", json={"MediaContainer": {"Metadata": [
+        {"ratingKey": "9"}, {"ratingKey": "10", "title": "Next one", "parentIndex": 2, "index": 4}]}})
+    p = client.get("/api/play?ref=plex:9", headers=H).get_json()
+    assert p["url"] == "http://nas:32400/library/parts/77/123/file.mkv?X-Plex-Token=admintok"
+    assert p["offset"] == 600000 and p["duration"] == 3000000 and p["subtitle"] == "S2 E3 · Hello"
+    assert p["badges"] == ["DIRECT PLAY", "4K", "DOLBY VISION", "TRUEHD"]
+    assert p["next"]["ref"] == "plex:10"
+    assert client.get("/api/play?ref=plex:9|start", headers=H).get_json()["offset"] == 0
+    t = client.get("/api/play?ref=plex:9&transcode=1", headers=H).get_json()
+    assert t["hls"] is True and "/video/:/transcode/universal/start.m3u8?" in t["url"] and "offset=600" in t["url"]
+
+
+@responses.activate
+def test_play_show_and_episode_refs(client):
+    plex_common()
+    responses.get("http://nas:5055/api/v1/tv/95396", json={"id": 95396, "name": "Severance"})
+    responses.get("http://nas:32400/hubs/search", json={"MediaContainer": {"Hub": [{"Metadata": [
+        {"type": "show", "ratingKey": "5", "Guid": [{"id": "tmdb://95396"}]}]}]}})
+    responses.get("http://nas:32400/library/metadata/5", json=_meta("5", type="show",
+                  OnDeck={"Metadata": [{"ratingKey": "9"}]}))
+    responses.get("http://nas:32400/library/metadata/5/allLeaves", json={"MediaContainer": {"Metadata": [
+        {"ratingKey": "8", "parentIndex": 1, "index": 1}, {"ratingKey": "9", "parentIndex": 2, "index": 3}]}})
+    responses.get("http://nas:32400/library/metadata/9", json=_meta(
+        "9", type="episode", grandparentRatingKey="5", parentIndex=2, index=3, Media=[{"Part": [{"key": "/p/9"}]}]))
+    responses.get("http://nas:32400/library/metadata/8", json=_meta(
+        "8", type="episode", grandparentRatingKey="5", parentIndex=1, index=1, Media=[{"Part": [{"key": "/p/8"}]}]))
+    assert client.get("/api/play?ref=tv-95396", headers=H).get_json()["ratingKey"] == "9"   # on deck
+    assert client.get("/api/play?ref=tv-95396:s1e1", headers=H).get_json()["ratingKey"] == "8"
+    r = client.get("/api/play?ref=tv-95396:s9e9", headers=H)
+    assert r.status_code == 404 and "episode" in r.get_json()["error"]
+
+
+@responses.activate
+def test_progress_and_v2_actions(client):
+    plex_common()
+    responses.get("http://nas:32400/:/timeline", body="")
+    client.post("/api/plex/progress", json={"ratingKey": "9", "state": "paused", "time": 1000, "duration": 5000},
+                headers=H)
+    u = responses.calls[-1].request.url
+    assert "state=paused" in u and "key=%2Flibrary%2Fmetadata%2F9" in u
+    m = dict(MOVIES[1], tmdbId=777)
+    responses.get("http://nas:7878/api/v3/movie/2", json=m)
+    v1 = client.get("/api/svc/radarr/radarr/item/2", headers=H).get_json()
+    v2 = client.get("/api/svc/radarr/radarr/item/2", headers=dict(H, **{"X-Harbour-App": "2"})).get_json()
+    assert "play" not in [a["id"] for a in v1["actions"]]
+    assert v2["actions"][0]["id"] == "play" and v2["actions"][0]["arg"] == "movie-777"
+    assert v2["item"]["ref"] == "movie-777"
+
+
+@responses.activate
+def test_apk_v2(client):
+    responses.get("https://api.github.com/repos/StompDonkeys/harbour/releases", json=[
+        {"tag_name": "v0.1.9", "assets": [{"name": "Harbour.apk", "browser_download_url": "https://x/v1"}]},
+        {"tag_name": "v2.0.3", "assets": [{"name": "HarbourV2.apk", "browser_download_url": "https://x/v2"}]}])
+    responses.get("https://x/v2", body=b"V2APK")
+    r = client.get("/HarbourV2.apk")
+    assert r.status_code == 200 and r.data == b"V2APK"

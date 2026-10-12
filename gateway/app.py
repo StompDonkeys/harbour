@@ -15,6 +15,7 @@ import json
 import logging
 import os
 import posixpath
+import re
 import random
 import threading
 import time
@@ -370,6 +371,7 @@ class Radarr(Arr):
         return clean({
             "key": key or f"radarr:{self.inst}:{m['id']}",
             "id": str(m["id"]),
+            "ref": f"movie-{m['tmdbId']}" if m.get("tmdbId") else None,
             "title": m.get("title") or "Untitled",
             "subtitle": subtitle,
             "poster": self.image(imgs, "poster", "w342"),
@@ -479,6 +481,8 @@ class Radarr(Arr):
             ("Path", m.get("path")),
         )
         acts = [
+            *([action("play", "Play", "primary", opens="play", arg=f"movie-{m['tmdbId']}")]
+              if is_v2() and PLEX and m.get("hasFile") and m.get("tmdbId") else []),
             action("search", "Auto search", "primary"),
             action("releases", "Manual search", opens="releases", arg="movie"),
             *([action("info", "Cast & more", opens="item", arg=f"hub/hub/movie-{m['tmdbId']}")]
@@ -538,6 +542,7 @@ class Sonarr(Arr):
         return clean({
             "key": key or f"sonarr:{self.inst}:{s['id']}",
             "id": str(s["id"]),
+            "ref": f"tv-{s['tmdbId']}" if s.get("tmdbId") else None,
             "title": s.get("title") or "Untitled",
             "subtitle": subtitle,
             "poster": self.image(imgs, "poster", "w342"),
@@ -660,6 +665,9 @@ class Sonarr(Arr):
                 eid = str(e["id"])
                 label = f"{self.sxe(e)} “{e.get('title') or 'TBA'}”"
                 ep_acts = [
+                    *([action("play", "Play", "primary", opens="play",
+                              arg=f"tv-{s['tmdbId']}:s{n}e{e.get('episodeNumber', 0)}")]
+                      if is_v2() and PLEX and e.get("hasFile") and s.get("tmdbId") else []),
                     action("episode_search", "Auto search", "primary", arg=eid),
                     action("releases", "Manual search", opens="releases", arg=f"episode:{eid}"),
                     action("episode_unmonitor", "Unmonitor", arg=eid) if e.get("monitored")
@@ -691,6 +699,8 @@ class Sonarr(Arr):
                 "episodes": episodes,
             }))
         acts = [
+            *([action("play", "Play", "primary", opens="play", arg=f"tv-{s['tmdbId']}")]
+              if is_v2() and PLEX and st.get("episodeFileCount") and s.get("tmdbId") else []),
             action("search", "Search all missing", "primary"),
             *([action("info", "Cast & more", opens="item", arg=f"hub/hub/tv-{s['tmdbId']}")]
               if HUB and s.get("tmdbId") else []),
@@ -841,6 +851,7 @@ class Seerr(HomeCache):
         return clean({
             "key": f"seerr:{mt}-{r['id']}",
             "id": f"{mt}-{r['id']}",
+            "ref": f"{mt}-{r['id']}",
             "title": r.get("title") or r.get("name") or "Untitled",
             "subtitle": join(year_of(date), "Movie" if mt == "movie" else "Series",
                              f"★ {vote:.1f}" if vote else None),
@@ -1032,6 +1043,11 @@ class Seerr(HomeCache):
 PLEX_TV = "https://plex.tv"
 
 
+def is_v2():
+    """Harbour v2 has a built-in player; it gets Play buttons instead of Play in Plex."""
+    return has_request_context() and request.headers.get("X-Harbour-App") == "2"
+
+
 def plex_user_from_request():
     """The Plex Home profile the TV picked (Settings → Plex profile), sent as headers."""
     if not has_request_context():
@@ -1137,6 +1153,106 @@ class Plex:
         if not path:
             return None
         return f"/plexart?w={w}&h={h}&p={quote(path, safe='')}"
+
+    def meta(self, rk, token):
+        m = (self.get(f"/library/metadata/{rk}", token=token, includeGuids=1, includeOnDeck=1)
+             .get("Metadata") or [None])[0]
+        if not m:
+            raise ApiError("Plex: that item is gone", 404)
+        return m
+
+    def leaves(self, rk, token):
+        return self.get(f"/library/metadata/{rk}/allLeaves", token=token).get("Metadata") or []
+
+    def resolve(self, ref, token):
+        """ref → a playable movie/episode in Plex: plex:<ratingKey>, movie-<tmdb>, tv-<tmdb>, tv-<tmdb>:s1e2."""
+        if ref.startswith("plex:"):
+            m = self.meta(ref[5:], token)
+        else:
+            base, _, ep = ref.partition(":")
+            mt, _, tid = base.partition("-")
+            if mt not in ("movie", "tv") or not tid.isdigit():
+                raise ApiError("Bad play reference")
+            title = ""
+            if HUB:
+                title = safe(lambda: (lambda d: d.get("title") or d.get("name"))(HUB._tmdb(mt, int(tid))), "tmdb", "")
+            found = self.find(mt, tid, title, token)
+            if not found:
+                raise ApiError("That isn't in Plex yet", 404)
+            m = self.meta(found["ratingKey"], token)
+            if ep:
+                mm = re.fullmatch(r"s(\d+)e(\d+)", ep)
+                want = (int(mm.group(1)), int(mm.group(2))) if mm else None
+                m = next((x for x in self.leaves(m["ratingKey"], token)
+                          if (x.get("parentIndex"), x.get("index")) == want), None)
+                if not m:
+                    raise ApiError("That episode isn't in Plex yet", 404)
+                m = self.meta(m["ratingKey"], token)
+        if m.get("type") in ("show", "season"):
+            deck = ((m.get("OnDeck") or {}).get("Metadata") or [None])[0]
+            if not deck:
+                leaves = self.leaves(m["ratingKey"], token)
+                deck = next((x for x in leaves if not x.get("viewCount")), leaves[0] if leaves else None)
+            if not deck:
+                raise ApiError("No episodes in Plex", 404)
+            m = self.meta(deck["ratingKey"], token)
+        if m.get("type") not in ("movie", "episode"):
+            raise ApiError("Plex can't play that", 400)
+        return m
+
+    def play_info(self, ref, token, transcode=False, start=False):
+        m = self.resolve(ref, token)
+        rk = m["ratingKey"]
+        media = (m.get("Media") or [{}])[0]
+        part = (media.get("Part") or [{}])[0]
+        if not part.get("key"):
+            raise ApiError("Plex has no file for that", 404)
+        offset = 0 if start else int(m.get("viewOffset") or 0)
+        if transcode:
+            q = {"path": f"/library/metadata/{rk}", "mediaIndex": 0, "partIndex": 0, "protocol": "hls",
+                 "fastSeek": 1, "directPlay": 0, "directStream": 1, "directStreamAudio": 1,
+                 "videoQuality": 100, "maxVideoBitrate": 40000, "videoResolution": "3840x2160",
+                 "subtitles": "auto", "offset": offset // 1000, "session": f"harbour-{rk}-{int(time.time())}",
+                 "X-Plex-Token": token, "X-Plex-Client-Identifier": "harbour-v2",
+                 "X-Plex-Product": "Harbour", "X-Plex-Platform": "Android"}
+            url = f"{self.url}/video/:/transcode/universal/start.m3u8?" + "&".join(
+                f"{k}={quote(str(v), safe='')}" for k, v in q.items())
+        else:
+            url = f"{self.url}{part['key']}?X-Plex-Token={quote(token, safe='')}"
+        is_ep = m.get("type") == "episode"
+        nxt = None
+        if is_ep:
+            leaves = safe(lambda: self.leaves(m["grandparentRatingKey"], token), "plex leaves", [])
+            keys = [x.get("ratingKey") for x in leaves]
+            if rk in keys and keys.index(rk) + 1 < len(leaves):
+                n = leaves[keys.index(rk) + 1]
+                nxt = clean({"ref": f"plex:{n['ratingKey']}", "title": n.get("title"),
+                             "subtitle": f"S{n.get('parentIndex', 0)} E{n.get('index', 0)}",
+                             "thumb": self.art(n.get("thumb"), 320, 180)})
+        dr = media.get("videoDynamicRange") or ""
+        badges = [b for b in (
+            "TRANSCODE" if transcode else "DIRECT PLAY",
+            {"4k": "4K", "1080": "1080p", "720": "720p"}.get(str(media.get("videoResolution")), None),
+            "DOLBY VISION" if "dolby" in dr.lower() or media.get("DOVIPresent") else ("HDR" if "hdr" in dr.lower() else None),
+            {"truehd": "TRUEHD", "eac3": "DD+", "ac3": "DOLBY DIGITAL", "dca": "DTS", "dts": "DTS"}.get(
+                (media.get("audioCodec") or "").lower()),
+        ) if b]
+        return clean({
+            "ref": ref, "ratingKey": rk, "url": url, "hls": transcode, "offset": offset,
+            "duration": int(m.get("duration") or media.get("duration") or 0),
+            "title": m.get("grandparentTitle") if is_ep else m.get("title"),
+            "subtitle": f"S{m.get('parentIndex', 0)} E{m.get('index', 0)} · {m.get('title')}" if is_ep
+            else join(m.get("year"), fmt_runtime((m.get("duration") or 0) // 60000)),
+            "backdrop": self.art(m.get("art") or m.get("grandparentArt"), 1280, 720),
+            "badges": badges, "next": nxt,
+        })
+
+    def timeline(self, token, rk, state, time_ms, duration_ms):
+        requests.get(f"{self.url}/:/timeline", params={
+            "ratingKey": rk, "key": f"/library/metadata/{rk}", "state": state,
+            "time": int(time_ms), "duration": int(duration_ms), "playbackTime": int(time_ms),
+        }, headers=dict(self._headers(token), **{"X-Plex-Client-Identifier": "harbour-v2",
+                                               "X-Plex-Device-Name": "Harbour"}), timeout=10)
 
     def on_deck(self, token):
         return self.get("/library/onDeck", token=token, includeGuids=1).get("Metadata") or []
@@ -1268,6 +1384,7 @@ class Hub:
                        f"{left}m left" if off else ("Up next" if is_ep else None))
             deck.append(clean({
                 "key": f"plex:{m.get('ratingKey')}", "id": f"{'tv' if is_ep else 'movie'}-{tmdb}",
+                "ref": f"plex:{m.get('ratingKey')}",
                 "title": title or "?", "subtitle": sub,
                 "backdrop": self.plex.art(m.get("art") or m.get("grandparentArt") or m.get("thumb")),
                 "poster": self.plex.art(m.get("grandparentThumb") if is_ep else m.get("thumb"), 342, 513),
@@ -1406,8 +1523,18 @@ class Hub:
                 else:
                     state = f"{pm.get('viewedLeafCount', 0)} of {pm.get('leafCount', 0)} episodes watched"
                 page["facts"].insert(0, {"label": "Plex", "value": state})
-                page["actions"].insert(0, action("plex", "▶  Play in Plex", "primary", opens="plex",
-                                                 arg=f"{self.plex.machine_id()}|{pm.get('ratingKey')}"))
+                rk = pm.get("ratingKey")
+                if is_v2():
+                    if mt == "movie" and pm.get("viewOffset"):
+                        left = max(0, ((pm.get("duration") or 0) - pm["viewOffset"]) // 60000)
+                        page["actions"][0:0] = [
+                            action("play", f"Resume · {left}m left", "primary", opens="play", arg=f"plex:{rk}"),
+                            action("play_start", "Play from start", opens="play", arg=f"plex:{rk}|start")]
+                    else:
+                        page["actions"].insert(0, action("play", "Play", "primary", opens="play", arg=f"plex:{rk}"))
+                else:
+                    page["actions"].insert(0, action("plex", "▶  Play in Plex", "primary", opens="plex",
+                                                     arg=f"{self.plex.machine_id()}|{rk}"))
 
         # trailer
         vids = d.get("relatedVideos") or []
@@ -1887,7 +2014,7 @@ def warm_loop():
         time.sleep(240)
 
 
-PUBLIC = ("/", "/apk", "/Harbour.apk")
+PUBLIC = ("/", "/apk", "/Harbour.apk", "/HarbourV2.apk")
 
 
 @app.before_request
@@ -1979,6 +2106,48 @@ def svc_home(kind, inst):
     if isinstance(s, Hub):
         return jsonify(s.home_cached(*plex_user_from_request()))
     return jsonify(s.home_cached())
+
+
+def plex_token():
+    if not PLEX:
+        raise ApiError("Plex isn't configured", 404)
+    return PLEX.token_for(*plex_user_from_request())
+
+
+@app.get("/api/play")
+def play():
+    ref = request.args.get("ref", "")
+    start = ref.endswith("|start") or request.args.get("start") == "1"
+    ref = ref.split("|")[0]
+    token = plex_token()
+    return jsonify(PLEX.play_info(ref, token, transcode=request.args.get("transcode") == "1", start=start))
+
+
+@app.post("/api/plex/progress")
+def plex_progress():
+    b = request.get_json(silent=True) or {}
+    PLEX.timeline(plex_token(), b.get("ratingKey"), b.get("state", "playing"), b.get("time", 0), b.get("duration", 0))
+    if HUB and b.get("state") == "stopped":
+        HUB.drop_home()
+    return jsonify(ok=True)
+
+
+@app.get("/HarbourV2.apk")
+@app.get("/harbourv2.apk")
+def apk_v2():
+    """Newest Harbour v2 build (tags v2.*) for Downloader."""
+    repo = CFG.get("github_repo") or DEFAULT_REPO
+    rels = requests.get(f"https://api.github.com/repos/{repo}/releases", params={"per_page": 30}, timeout=20).json()
+    asset = next((a for r in rels if str(r.get("tag_name", "")).startswith("v2.")
+                  for a in r.get("assets") or [] if a.get("name", "").endswith(".apk")), None)
+    if not asset:
+        return jsonify(error="No Harbour v2 build published yet"), 404
+    r = requests.get(asset["browser_download_url"], stream=True, timeout=60)
+    headers = {"Content-Disposition": 'attachment; filename="HarbourV2.apk"'}
+    if r.headers.get("Content-Length"):
+        headers["Content-Length"] = r.headers["Content-Length"]
+    return Response(stream_with_context(r.iter_content(64 * 1024)),
+                    mimetype="application/vnd.android.package-archive", headers=headers)
 
 
 @app.get("/api/plex/users")
