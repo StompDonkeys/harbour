@@ -1892,7 +1892,7 @@ PUBLIC = ("/", "/apk", "/Harbour.apk")
 
 @app.before_request
 def check_token():
-    if request.path in PUBLIC:
+    if request.path.lower() in [p.lower() for p in PUBLIC]:
         return None
     token = CFG.get("token") or ""
     given = request.headers.get("X-Token") or request.args.get("t") or ""
@@ -1928,6 +1928,7 @@ def root():
 
 @app.get("/apk")
 @app.get("/Harbour.apk")
+@app.get("/harbour.apk")
 def apk():
     """Short link for Downloader: http://<nas>:8765/Harbour.apk streams the newest APK from GitHub.
     Served directly (not a redirect) with an .apk name and type, so Downloader installs it."""
