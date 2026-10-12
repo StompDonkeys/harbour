@@ -20,6 +20,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -208,8 +209,8 @@ fun PlayerScreen(ref: String, onExit: () -> Unit) {
     }
 
     // Auto-hide the controls.
-    LaunchedEffect(poke, playing, picker) {
-        if (playing && picker == null) {
+    LaunchedEffect(poke, playing, picker, options) {
+        if (playing && picker == null && !options) {
             delay(4500)
             controls = false
         }
@@ -223,16 +224,27 @@ fun PlayerScreen(ref: String, onExit: () -> Unit) {
         poke++
     }
 
+    var options by remember { mutableStateOf(false) }   // the Audio / Subtitles row (press Down)
+    var flash by remember { mutableIntStateOf(0) }       // brief play/pause glyph
+
     BackHandler {
         when {
             picker != null -> picker = null
+            options -> options = false
             controls && playing -> controls = false
             else -> onExit()
         }
     }
 
     val surfaceFocus = remember { FocusRequester() }
-    val playFocus = remember { FocusRequester() }
+    val firstOption = remember { FocusRequester() }
+
+    fun togglePlay() {
+        if (player.isPlaying) player.pause() else player.play()
+        controls = true
+        flash++
+        poke++
+    }
 
     Box(
         Modifier
@@ -243,21 +255,31 @@ fun PlayerScreen(ref: String, onExit: () -> Unit) {
             .onPreviewKeyEvent { e ->
                 if (e.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
                 val code = e.nativeKeyEvent.keyCode
+                val fast = e.nativeKeyEvent.repeatCount > 3
+                poke++
                 when {
-                    code == AndroidKeyEvent.KEYCODE_MEDIA_PLAY_PAUSE -> {
-                        if (player.isPlaying) player.pause() else player.play()
-                        controls = true; poke++; true
-                    }
+                    code == AndroidKeyEvent.KEYCODE_MEDIA_PLAY_PAUSE -> { togglePlay(); true }
                     code == AndroidKeyEvent.KEYCODE_MEDIA_FAST_FORWARD -> { seekBy(30_000); true }
                     code == AndroidKeyEvent.KEYCODE_MEDIA_REWIND -> { seekBy(-10_000); true }
-                    !controls && (code == AndroidKeyEvent.KEYCODE_DPAD_RIGHT) -> { seekBy(10_000); true }
-                    !controls && (code == AndroidKeyEvent.KEYCODE_DPAD_LEFT) -> { seekBy(-10_000); true }
-                    !controls && (code == AndroidKeyEvent.KEYCODE_DPAD_CENTER || code == AndroidKeyEvent.KEYCODE_ENTER) -> {
-                        if (player.isPlaying) player.pause() else player.play()
-                        controls = true; poke++; true
+                    options -> when (code) {
+                        AndroidKeyEvent.KEYCODE_DPAD_UP -> {
+                            options = false
+                            runCatching { surfaceFocus.requestFocus() }
+                            true
+                        }
+                        else -> false   // let the option buttons handle it
                     }
-                    !controls -> { controls = true; poke++; true }
-                    else -> { poke++; false }
+                    code == AndroidKeyEvent.KEYCODE_DPAD_RIGHT -> { seekBy(if (fast) 60_000 else 10_000); true }
+                    code == AndroidKeyEvent.KEYCODE_DPAD_LEFT -> { seekBy(if (fast) -60_000 else -10_000); true }
+                    code == AndroidKeyEvent.KEYCODE_DPAD_CENTER || code == AndroidKeyEvent.KEYCODE_ENTER -> {
+                        togglePlay(); true
+                    }
+                    code == AndroidKeyEvent.KEYCODE_DPAD_DOWN -> {
+                        controls = true
+                        options = true
+                        true
+                    }
+                    else -> { controls = true; true }
                 }
             },
     ) {
@@ -282,7 +304,38 @@ fun PlayerScreen(ref: String, onExit: () -> Unit) {
         }
         if (buffering && error == null) {
             CircularProgressIndicator(color = HColors.Text, strokeWidth = 3.dp,
-                modifier = Modifier.align(Alignment.Center).size(48.dp))
+                modifier = Modifier.align(Alignment.Center).size(44.dp))
+        }
+
+        // Paused: a quiet glyph in the middle. Play/pause press: a brief flash.
+        var showGlyph by remember { mutableStateOf(false) }
+        LaunchedEffect(flash) {
+            if (flash > 0) {
+                showGlyph = true
+                delay(700)
+                showGlyph = false
+            }
+        }
+        AnimatedVisibility(
+            visible = (!playing && !buffering && error == null && i != null) || showGlyph,
+            enter = fadeIn(tween(150)),
+            exit = fadeOut(tween(300)),
+            modifier = Modifier.align(Alignment.Center),
+        ) {
+            Box(
+                Modifier.size(84.dp).clip(CircleShape).background(Color.Black.copy(alpha = 0.45f)),
+                contentAlignment = Alignment.Center,
+            ) {
+                if (playing) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(9.dp)) {
+                        Box(Modifier.width(9.dp).height(30.dp).clip(RoundedCornerShape(3.dp)).background(Color.White))
+                        Box(Modifier.width(9.dp).height(30.dp).clip(RoundedCornerShape(3.dp)).background(Color.White))
+                    }
+                } else {
+                    androidx.compose.material3.Icon(Icons.Filled.PlayArrow, contentDescription = "Paused",
+                        tint = Color.White, modifier = Modifier.size(46.dp))
+                }
+            }
         }
 
         val err = error
@@ -301,15 +354,15 @@ fun PlayerScreen(ref: String, onExit: () -> Unit) {
         ) {
             if (next != null) {
                 CompositionLocalProvider(LocalBackdrop provides gw.img(i.backdrop)) {
-                    GlassPanel(Modifier.width(300.dp), shape = RoundedCornerShape(20.dp)) {
-                        Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                    GlassPanel(Modifier.width(280.dp), shape = RoundedCornerShape(18.dp)) {
+                        Row(Modifier.padding(10.dp), verticalAlignment = Alignment.CenterVertically) {
                             AsyncImage(model = gw.img(next.thumb), contentDescription = null, contentScale = ContentScale.Crop,
-                                modifier = Modifier.width(104.dp).height(58.dp).clip(RoundedCornerShape(10.dp)))
+                                modifier = Modifier.width(96.dp).height(54.dp).clip(RoundedCornerShape(9.dp)))
                             Spacer(Modifier.width(12.dp))
                             Column {
                                 Text("UP NEXT IN ${(remaining / 1000).coerceAtLeast(0)}s", fontSize = 10.sp,
                                     fontWeight = FontWeight.Bold, letterSpacing = 1.2.sp, color = HColors.TextDim)
-                                Text(listOfNotNull(next.subtitle, next.title).joinToString(" · "), fontSize = 14.sp,
+                                Text(listOfNotNull(next.subtitle, next.title).joinToString(" · "), fontSize = 13.sp,
                                     fontWeight = FontWeight.Bold, maxLines = 2, overflow = TextOverflow.Ellipsis)
                             }
                         }
@@ -318,80 +371,84 @@ fun PlayerScreen(ref: String, onExit: () -> Unit) {
             }
         }
 
+        // Controls: title + a thin progress line over a soft shade. No panel, no clutter.
         AnimatedVisibility(
             visible = controls && i != null && err == null,
-            enter = fadeIn(tween(220)) + slideInVertically(tween(320)) { it / 3 },
-            exit = fadeOut(tween(300)) + slideOutVertically(tween(300)) { it / 3 },
+            enter = fadeIn(tween(250)),
+            exit = fadeOut(tween(400)),
             modifier = Modifier.align(Alignment.BottomCenter),
         ) {
             if (i != null) {
-                LaunchedEffect(Unit) {
-                    delay(50)
-                    runCatching { playFocus.requestFocus() }
-                }
-                Box(
+                Column(
                     Modifier
                         .fillMaxWidth()
                         .background(
                             androidx.compose.ui.graphics.Brush.verticalGradient(
-                                0f to Color.Transparent, 1f to Color.Black.copy(alpha = 0.7f),
+                                0f to Color.Transparent, 0.35f to Color.Black.copy(alpha = 0.35f),
+                                1f to Color.Black.copy(alpha = 0.78f),
                             ),
                         )
-                        .padding(28.dp),
+                        .padding(start = 48.dp, end = 48.dp, top = 90.dp, bottom = 26.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
                 ) {
-                    CompositionLocalProvider(LocalBackdrop provides gw.img(i.backdrop)) {
-                        GlassPanel(Modifier.fillMaxWidth(), shape = RoundedCornerShape(24.dp),
-                            tint = Color(0xB3141418)) {
-                            Column(Modifier.padding(horizontal = 24.dp, vertical = 18.dp),
-                                verticalArrangement = Arrangement.spacedBy(14.dp)) {
-                                Row(verticalAlignment = Alignment.Bottom) {
-                                    Column(Modifier.weight(1f)) {
-                                        Text((i.title ?: "").uppercase(), fontSize = 11.sp, fontWeight = FontWeight.Bold,
-                                            letterSpacing = 1.3.sp, color = HColors.TextDim, maxLines = 1)
-                                        Text(i.subtitle ?: i.title ?: "", fontSize = 22.sp, fontWeight = FontWeight.ExtraBold,
-                                            maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                    }
-                                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                                        i.badges.forEach { FormatTag(it) }
-                                    }
-                                }
-                                Scrubber(position, duration, buffered, onSeek = { seekBy(it) }, onFocus = { poke++ })
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    val endsAt = remember(position / 60000, duration) {
-                                        val end = System.currentTimeMillis() + (duration - position)
-                                        java.text.SimpleDateFormat("h:mm a", Locale.getDefault()).format(java.util.Date(end))
-                                    }
-                                    Text("${fmtClock(position)}  /  ${fmtClock(duration)}", fontSize = 14.sp,
-                                        fontWeight = FontWeight.SemiBold)
-                                    Text("   ·   ends $endsAt", fontSize = 14.sp, color = HColors.TextDim)
-                                    Spacer(Modifier.weight(1f))
-                                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                                        TvButton(if (playing) "Pause" else "Play", {
-                                            if (player.isPlaying) player.pause() else player.play()
-                                            poke++
-                                        }, focusRequester = playFocus, icon = if (playing) null else Icons.Filled.PlayArrow)
-                                        TvButton("−10s", { seekBy(-10_000) }, icon = Icons.Filled.Refresh)
-                                        TvButton("Audio · ${audioLabel(tracks)}", { picker = "audio" })
-                                        TvButton("Subtitles · ${subLabel(tracks)}", { picker = "subs" }, icon = Icons.Filled.List)
-                                        if (i.next != null) {
-                                            TvButton("Next", {
-                                                report("stopped")
-                                                currentRef = i.next.ref
-                                                triedTranscode = false
-                                                loadKey++
-                                            })
-                                        }
-                                    }
-                                }
+                    Row(verticalAlignment = Alignment.Bottom) {
+                        Column(Modifier.weight(1f)) {
+                            if (i.subtitle != null) {
+                                Text((i.title ?: "").uppercase(), fontSize = 11.sp, fontWeight = FontWeight.Bold,
+                                    letterSpacing = 1.3.sp, color = HColors.TextDim, maxLines = 1)
+                            }
+                            Text(i.subtitle ?: i.title ?: "", fontSize = 19.sp, fontWeight = FontWeight.Bold,
+                                maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        }
+                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) { i.badges.forEach { FormatTag(it) } }
+                    }
+                    ProgressLine(position, duration, buffered)
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(fmtClock(position), fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                        Spacer(Modifier.weight(1f))
+                        val endsAt = remember(position / 60000, duration) {
+                            val end = System.currentTimeMillis() + (duration - position)
+                            java.text.SimpleDateFormat("h:mm a", Locale.getDefault()).format(java.util.Date(end))
+                        }
+                        Text("−${fmtClock((duration - position).coerceAtLeast(0))}  ·  ends $endsAt",
+                            fontSize = 13.sp, color = HColors.TextDim)
+                    }
+                    AnimatedVisibility(
+                        visible = options,
+                        enter = fadeIn(tween(200)) + slideInVertically(tween(260)) { it / 2 },
+                        exit = fadeOut(tween(150)),
+                    ) {
+                        LaunchedEffect(Unit) {
+                            delay(40)
+                            runCatching { firstOption.requestFocus() }
+                        }
+                        Row(Modifier.padding(top = 6.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                            TvButton("Audio · ${audioLabel(tracks)}", { picker = "audio" }, focusRequester = firstOption)
+                            TvButton("Subtitles · ${subLabel(tracks)}", { picker = "subs" }, icon = Icons.Filled.List)
+                            TvButton("Restart", { player.seekTo(0); poke++ }, icon = Icons.Filled.Refresh)
+                            if (i.next != null) {
+                                TvButton("Next episode", {
+                                    report("stopped")
+                                    options = false
+                                    currentRef = i.next.ref
+                                    triedTranscode = false
+                                    loadKey++
+                                }, icon = Icons.Filled.PlayArrow)
                             }
                         }
+                    }
+                    if (!options) {
+                        Text("▾  Audio & subtitles", fontSize = 11.sp, color = HColors.TextFaint)
                     }
                 }
             }
         }
     }
 
-    LaunchedEffect(controls) { if (!controls) runCatching { surfaceFocus.requestFocus() } }
+    LaunchedEffect(controls, options) {
+        if (!options) runCatching { surfaceFocus.requestFocus() }
+        if (!controls) options = false
+    }
 
     picker?.let { kind ->
         val type = if (kind == "audio") C.TRACK_TYPE_AUDIO else C.TRACK_TYPE_TEXT
@@ -422,35 +479,16 @@ fun PlayerScreen(ref: String, onExit: () -> Unit) {
 }
 
 @Composable
-private fun Scrubber(position: Long, duration: Long, buffered: Long, onSeek: (Long) -> Unit, onFocus: () -> Unit) {
-    var focused by remember { mutableStateOf(false) }
+private fun ProgressLine(position: Long, duration: Long, buffered: Long) {
     val frac = if (duration > 0) (position.toFloat() / duration).coerceIn(0f, 1f) else 0f
     val bfrac = if (duration > 0) (buffered.toFloat() / duration).coerceIn(0f, 1f) else 0f
-    Box(
-        Modifier
-            .fillMaxWidth()
-            .height(22.dp)
-            .onFocusChanged { focused = it.isFocused; if (it.isFocused) onFocus() }
-            .onPreviewKeyEvent { e ->
-                if (e.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
-                when (e.nativeKeyEvent.keyCode) {
-                    AndroidKeyEvent.KEYCODE_DPAD_RIGHT -> { onSeek(if (e.nativeKeyEvent.repeatCount > 3) 60_000 else 10_000); true }
-                    AndroidKeyEvent.KEYCODE_DPAD_LEFT -> { onSeek(if (e.nativeKeyEvent.repeatCount > 3) -60_000 else -10_000); true }
-                    else -> false
-                }
-            }
-            .focusable(),
-        contentAlignment = Alignment.CenterStart,
-    ) {
-        val h = if (focused) 6.dp else 4.dp
-        Box(Modifier.fillMaxWidth().height(h).clip(RoundedCornerShape(3.dp)).background(Color.White.copy(alpha = 0.22f)))
-        Box(Modifier.fillMaxWidth(bfrac).height(h).clip(RoundedCornerShape(3.dp)).background(Color.White.copy(alpha = 0.40f)))
-        Box(Modifier.fillMaxWidth(frac).height(h).clip(RoundedCornerShape(3.dp)).background(HColors.Text))
-        if (focused) {
-            Row(Modifier.fillMaxWidth()) {
-                Spacer(Modifier.fillMaxWidth(frac).height(1.dp))
-                Box(Modifier.size(16.dp).clip(CircleShape).background(HColors.Text))
-            }
+    Box(Modifier.fillMaxWidth().height(12.dp), contentAlignment = Alignment.CenterStart) {
+        Box(Modifier.fillMaxWidth().height(4.dp).clip(RoundedCornerShape(2.dp)).background(Color.White.copy(alpha = 0.25f)))
+        Box(Modifier.fillMaxWidth(bfrac).height(4.dp).clip(RoundedCornerShape(2.dp)).background(Color.White.copy(alpha = 0.40f)))
+        Box(Modifier.fillMaxWidth(frac).height(4.dp).clip(RoundedCornerShape(2.dp)).background(HColors.Text))
+        Row(Modifier.fillMaxWidth()) {
+            Spacer(Modifier.fillMaxWidth(frac))
+            Box(Modifier.offset(x = (-6).dp).size(12.dp).clip(CircleShape).background(HColors.Text))
         }
     }
 }

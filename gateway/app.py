@@ -1043,6 +1043,13 @@ class Seerr(HomeCache):
 PLEX_TV = "https://plex.tv"
 
 
+def first_meta(x):
+    """Plex sometimes returns a single item as an object instead of a one-item list."""
+    if isinstance(x, list):
+        return x[0] if x else None
+    return x if isinstance(x, dict) else None
+
+
 def is_v2():
     """Harbour v2 has a built-in player; it gets Play buttons instead of Play in Plex."""
     return has_request_context() and request.headers.get("X-Harbour-App") == "2"
@@ -1155,8 +1162,8 @@ class Plex:
         return f"/plexart?w={w}&h={h}&p={quote(path, safe='')}"
 
     def meta(self, rk, token):
-        m = (self.get(f"/library/metadata/{rk}", token=token, includeGuids=1, includeOnDeck=1)
-             .get("Metadata") or [None])[0]
+        m = first_meta(self.get(f"/library/metadata/{rk}", token=token, includeGuids=1, includeOnDeck=1)
+                       .get("Metadata"))
         if not m:
             raise ApiError("Plex: that item is gone", 404)
         return m
@@ -1189,7 +1196,7 @@ class Plex:
                     raise ApiError("That episode isn't in Plex yet", 404)
                 m = self.meta(m["ratingKey"], token)
         if m.get("type") in ("show", "season"):
-            deck = ((m.get("OnDeck") or {}).get("Metadata") or [None])[0]
+            deck = first_meta((m.get("OnDeck") or {}).get("Metadata"))
             if not deck:
                 leaves = self.leaves(m["ratingKey"], token)
                 deck = next((x for x in leaves if not x.get("viewCount")), leaves[0] if leaves else None)
@@ -2045,7 +2052,7 @@ def on_error(e):
     if hasattr(e, "code") and hasattr(e, "description"):  # werkzeug HTTP errors
         return jsonify(error=e.description), e.code
     log.exception("unhandled")
-    return jsonify(error=f"Gateway error: {e}"), 500
+    return jsonify(error=f"Gateway error: {type(e).__name__} {e}".strip()), 500
 
 
 @app.get("/")

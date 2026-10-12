@@ -621,8 +621,9 @@ def test_play_show_and_episode_refs(client):
     responses.get("http://nas:5055/api/v1/tv/95396", json={"id": 95396, "name": "Severance"})
     responses.get("http://nas:32400/hubs/search", json={"MediaContainer": {"Hub": [{"Metadata": [
         {"type": "show", "ratingKey": "5", "Guid": [{"id": "tmdb://95396"}]}]}]}})
+    # Plex returns OnDeck.Metadata as a single object for shows
     responses.get("http://nas:32400/library/metadata/5", json=_meta("5", type="show",
-                  OnDeck={"Metadata": [{"ratingKey": "9"}]}))
+                  OnDeck={"Metadata": {"ratingKey": "9"}}))
     responses.get("http://nas:32400/library/metadata/5/allLeaves", json={"MediaContainer": {"Metadata": [
         {"ratingKey": "8", "parentIndex": 1, "index": 1}, {"ratingKey": "9", "parentIndex": 2, "index": 3}]}})
     responses.get("http://nas:32400/library/metadata/9", json=_meta(
