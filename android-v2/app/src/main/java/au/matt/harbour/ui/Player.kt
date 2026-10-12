@@ -104,6 +104,7 @@ fun PlayerScreen(ref: String, onExit: () -> Unit) {
     var controls by remember { mutableStateOf(true) }
     var poke by remember { mutableIntStateOf(0) }
     var picker by remember { mutableStateOf<String?>(null) }   // "audio" | "subs"
+    var options by remember { mutableStateOf(false) }   // the Audio / Subtitles row (press Down)
     var tracks by remember { mutableStateOf(Tracks.EMPTY) }
 
     val player = remember {
@@ -224,7 +225,6 @@ fun PlayerScreen(ref: String, onExit: () -> Unit) {
         poke++
     }
 
-    var options by remember { mutableStateOf(false) }   // the Audio / Subtitles row (press Down)
     var flash by remember { mutableIntStateOf(0) }       // brief play/pause glyph
 
     BackHandler {
