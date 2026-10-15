@@ -219,7 +219,7 @@ private fun DetailContent(
     val gridFacts = if (isPerson) d.facts else d.facts.drop(8)
 
     Box(Modifier.fillMaxSize()) {
-        Backdrop(gw.img(d.item.backdrop ?: d.item.poster), dim = if (isPerson) 1.15f else 1f)
+        Backdrop(gw.hero(d.item.backdrop ?: d.item.poster), dim = if (isPerson) 1.15f else 1f)
         LazyColumn(
             state = listState,
             modifier = Modifier.fillMaxSize(),

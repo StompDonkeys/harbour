@@ -302,7 +302,7 @@ fun PlayerScreen(ref: String, onExit: () -> Unit) {
 
         val i = info
         if (i != null && position == 0L && buffering) {
-            AsyncImage(model = gw.img(i.backdrop), contentDescription = null, contentScale = ContentScale.Crop,
+            AsyncImage(model = gw.hero(i.backdrop), contentDescription = null, contentScale = ContentScale.Crop,
                 modifier = Modifier.fillMaxSize())
             Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.45f)))
         }

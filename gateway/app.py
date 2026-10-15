@@ -27,7 +27,7 @@ from urllib.parse import quote, urlsplit
 import requests
 from flask import Flask, Response, has_request_context, jsonify, request, stream_with_context
 
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 CONFIG_PATH = os.environ.get("HARBOUR_CONFIG", "/config/config.json")
 TMDB_IMG = "https://image.tmdb.org/t/p/"
 
@@ -1393,7 +1393,7 @@ class Hub:
                 "key": f"plex:{m.get('ratingKey')}", "id": f"{'tv' if is_ep else 'movie'}-{tmdb}",
                 "ref": f"plex:{m.get('ratingKey')}",
                 "title": title or "?", "subtitle": sub,
-                "backdrop": self.plex.art(m.get("art") or m.get("grandparentArt") or m.get("thumb")),
+                "backdrop": self.plex.art(m.get("art") or m.get("grandparentArt") or m.get("thumb"), 1920, 1080),
                 "poster": self.plex.art(m.get("grandparentThumb") if is_ep else m.get("thumb"), 342, 513),
                 "overview": m.get("summary"),
                 "progress": round(off / dur, 3) if dur and off else None,
@@ -2000,6 +2000,150 @@ def init():
              len(SERVICES), len(CLIENTS), "on" if FILES else "off")
 
 
+# ---------------------------------------------------------------- Calendar
+
+CAL_RANK = {"downloaded": 0, "downloading": 1, "airing": 2, "missing": 3, "upcoming": 4, "cinema": 5, "unmonitored": 6}
+
+
+def _clock(d):
+    return d.strftime("%I:%M %p").lstrip("0").lower() if d else None
+
+
+def calendar(start, end, unmonitored=False):
+    """Every Sonarr episode and Radarr release between two local dates (inclusive)."""
+    from datetime import date as _date
+    s0, s1 = _date.fromisoformat(start), _date.fromisoformat(end)
+    if (s1 - s0).days > 70:
+        raise ApiError("Calendar range is too long")
+    q0, q1 = (s0 - timedelta(days=1)).isoformat(), (s1 + timedelta(days=2)).isoformat()
+    now = datetime.now().astimezone()
+    sonarrs = [x for x in SERVICES.values() if x.kind == "sonarr"]
+    radarrs = [x for x in SERVICES.values() if x.kind == "radarr"]
+    um = "true" if unmonitored else "false"
+
+    def fetch_sonarr(so):
+        d = par(
+            cal=lambda: so.get("/calendar", start=q0, end=q1, unmonitored=um, includeSeries="true"),
+            queue=lambda: safe(lambda: so.get("/queue", page=1, pageSize=200).get("records", []),
+                               f"{so.name} queue", []),
+        )
+        return so, d["cal"], {r.get("episodeId") for r in d["queue"]}
+
+    def fetch_radarr(ra):
+        d = par(
+            cal=lambda: ra.get("/calendar", start=q0, end=q1, unmonitored=um),
+            queue=lambda: safe(lambda: ra.get("/queue", page=1, pageSize=200).get("records", []),
+                               f"{ra.name} queue", []),
+        )
+        return ra, d["cal"], {r.get("movieId") for r in d["queue"]}
+
+    futs = [POOL.submit(safe, (lambda so=so: fetch_sonarr(so)), f"{so.name} calendar", None) for so in sonarrs]
+    futs += [POOL.submit(safe, (lambda ra=ra: fetch_radarr(ra)), f"{ra.name} calendar", None) for ra in radarrs]
+    out, sources = [], []
+    for f in futs:
+        res = f.result()
+        if not res:
+            continue
+        svc_, cal, queued = res
+        sources.append({"svc": f"{svc_.kind}/{svc_.inst}", "kind": svc_.kind, "name": svc_.name})
+        if svc_.kind == "sonarr":
+            out += _cal_episodes(svc_, cal, queued, s0, s1, now)
+        else:
+            out += _cal_movies(svc_, cal, queued, s0, s1, now)
+    out.sort(key=lambda e: (e["date"], e.get("sort") or "", e["title"]))
+    return {"start": start, "end": end, "sources": sources, "entries": out}
+
+
+def _cal_episodes(so, cal, queued, s0, s1, now):
+    out = []
+    for e in cal:
+        at = parse_dt(e.get("airDateUtc"))
+        if not at:
+            continue
+        day = at.date()
+        if not (s0 <= day <= s1):
+            continue
+        s = e.get("series") or {}
+        runtime = timedelta(minutes=s.get("runtime") or 30)
+        if e.get("hasFile"):
+            st, label = "downloaded", "Downloaded"
+        elif e.get("id") in queued:
+            st, label = "downloading", "Downloading"
+        elif at > now:
+            st, label = "upcoming", f"Airs {_clock(at)}"
+        elif at + runtime > now:
+            st, label = "airing", "On air now"
+        elif not e.get("monitored"):
+            st, label = "unmonitored", "Unmonitored"
+        else:
+            st, label = "missing", "Missing"
+        tag = None
+        fin = (e.get("finaleType") or "").lower()
+        if e.get("episodeNumber") == 1:
+            tag = "Series premiere" if e.get("seasonNumber") == 1 else "New season"
+        elif fin == "series":
+            tag = "Series finale"
+        elif fin == "season":
+            tag = "Season finale"
+        imgs = s.get("images")
+        out.append(clean({
+            "key": f"{so.kind}:{so.inst}:e{e.get('id')}",
+            "date": day.isoformat(), "time": _clock(at), "sort": at.isoformat(),
+            "kind": "tv", "svc": f"{so.kind}/{so.inst}", "source": so.name,
+            "id": str(e.get("seriesId")), "open": f"tv-{s['tmdbId']}" if s.get("tmdbId") else None,
+            "title": s.get("title") or "?",
+            "subtitle": join(Sonarr.sxe(e), e.get("title")),
+            "poster": so.image(imgs, "poster", "w185"), "backdrop": so.image(imgs, "fanart", "original"),
+            "overview": e.get("overview") or s.get("overview"),
+            "status": st, "label": label, "tag": tag, "network": s.get("network"),
+        }))
+    return out
+
+
+def _cal_movies(ra, cal, queued, s0, s1, now):
+    from datetime import date as _date
+    out = []
+    today = now.date()
+    for m in cal:
+        for field, what in (("inCinemas", "In cinemas"), ("digitalRelease", "Digital release"),
+                            ("physicalRelease", "Physical release")):
+            raw = m.get(field)
+            if not raw:
+                continue
+            try:
+                day = _date.fromisoformat(raw[:10])
+            except ValueError:
+                continue
+            if not (s0 <= day <= s1):
+                continue
+            if m.get("hasFile"):
+                st, label = "downloaded", "Downloaded"
+            elif m.get("id") in queued:
+                st, label = "downloading", "Downloading"
+            elif field == "inCinemas":
+                st, label = "cinema", what
+            elif day > today:
+                st, label = "upcoming", what
+            elif not m.get("monitored"):
+                st, label = "unmonitored", "Unmonitored"
+            else:
+                st, label = "missing", "Missing"
+            imgs = m.get("images")
+            out.append(clean({
+                "key": f"{ra.kind}:{ra.inst}:{m.get('id')}:{field}",
+                "date": day.isoformat(), "sort": "~" + field,
+                "kind": "movie", "svc": f"{ra.kind}/{ra.inst}", "source": ra.name,
+                "id": str(m.get("id")), "open": f"movie-{m['tmdbId']}" if m.get("tmdbId") else None,
+                "title": m.get("title") or "?",
+                "subtitle": join(what, m.get("year"), fmt_runtime(m.get("runtime"))),
+                "poster": ra.image(imgs, "poster", "w185"), "backdrop": ra.image(imgs, "fanart", "original"),
+                "overview": m.get("overview"),
+                "status": st, "label": label, "tag": what if st in ("downloaded", "downloading", "missing") else None,
+                "quality": Radarr.quality(m) if m.get("hasFile") else None,
+            }))
+    return out
+
+
 def load_config():
     with open(CONFIG_PATH, encoding="utf-8") as f:
         return json.load(f)
@@ -2090,6 +2234,7 @@ def config():
                    files=FILES is not None,
                    downloads=bool(CLIENTS),
                    plex=PLEX is not None,
+                   calendar=any(s.kind in ("radarr", "sonarr") for s in SERVICES.values()),
                    repo=CFG.get("github_repo") or DEFAULT_REPO)
 
 
@@ -2244,6 +2389,14 @@ def files_list():
 @app.post("/api/files/op")
 def files_op():
     return jsonify(files().op(request.get_json(silent=True) or {}))
+
+
+@app.get("/api/calendar")
+def calendar_route():
+    a = request.args
+    if not a.get("start") or not a.get("end"):
+        raise ApiError("start and end are required")
+    return jsonify(calendar(a["start"], a["end"], a.get("unmonitored") in ("1", "true")))
 
 
 @app.get("/api/downloads")

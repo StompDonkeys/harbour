@@ -41,6 +41,7 @@ data class GatewayConfig(
     val files: Boolean = false,
     val downloads: Boolean = false,
     val plex: Boolean = false,
+    val calendar: Boolean = false,
     val repo: String = "StompDonkeys/harbour",
     val version: String = "",
 )
@@ -317,6 +318,20 @@ class Gateway(baseUrl: String, val token: String, val plexUser: String = "", val
         else -> base + url + (if (url.contains('?')) "&" else "?") + "t=" + enc(token)
     }
 
+    /**
+     * The same artwork at full-screen quality, for backdrops: TMDB's original instead of a
+     * thumbnail size, and 1080p from Plex's transcoder. Cards keep the small, fast versions.
+     */
+    fun hero(url: String?): String? {
+        if (url.isNullOrBlank()) return null
+        val big = when {
+            url.contains("image.tmdb.org/t/p/") -> url.replace(Regex("/t/p/[a-z0-9]+/"), "/t/p/original/")
+            url.startsWith("/plexart?") -> url.replace(Regex("w=\\d+&h=\\d+"), "w=1920&h=1080")
+            else -> url
+        }
+        return img(big)
+    }
+
     companion object {
         fun enc(s: String): String = URLEncoder.encode(s, "UTF-8").replace("+", "%20")
     }
@@ -419,3 +434,41 @@ class Prefs(context: Context) {
         get() = sp.getString("plexPin", "").orEmpty()
         set(v) { sp.edit().putString("plexPin", v).apply() }
 }
+
+// ------------------------------------------------------------------ calendar
+
+@Serializable
+data class CalSource(val svc: String, val kind: String, val name: String)
+
+@Serializable
+data class CalEntry(
+    val key: String,
+    val date: String,
+    val time: String? = null,
+    val kind: String,              // tv | movie
+    val svc: String,               // kind/inst
+    val source: String = "",
+    val id: String,
+    val open: String? = null,      // hub id: tv-<tmdb> / movie-<tmdb>
+    val title: String,
+    val subtitle: String? = null,
+    val poster: String? = null,
+    val backdrop: String? = null,
+    val overview: String? = null,
+    val status: String,            // downloaded | downloading | airing | missing | upcoming | cinema | unmonitored
+    val label: String = "",
+    val tag: String? = null,
+    val network: String? = null,
+    val quality: String? = null,
+)
+
+@Serializable
+data class CalendarData(
+    val start: String,
+    val end: String,
+    val sources: List<CalSource> = emptyList(),
+    val entries: List<CalEntry> = emptyList(),
+)
+
+suspend fun Gateway.calendar(start: String, end: String, unmonitored: Boolean): CalendarData =
+    get("/api/calendar?start=$start&end=$end&unmonitored=${if (unmonitored) 1 else 0}")

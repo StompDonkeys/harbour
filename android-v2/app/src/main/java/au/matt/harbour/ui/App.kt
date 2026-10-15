@@ -68,6 +68,7 @@ sealed interface Screen {
     data class Category(val svc: ServiceInfo, val key: String, val title: String) : Screen
     data class Releases(val svc: ServiceInfo, val itemId: String, val arg: String?, val title: String) : Screen
     data class Player(val ref: String) : Screen
+    data object Calendar : Screen
     data object Downloads : Screen
     data object Files : Screen
     data object Settings : Screen
@@ -192,6 +193,7 @@ private fun MainShell(config: GatewayConfig, settings: @Composable () -> Unit, u
     val tabs = remember(config) {
         buildList {
             config.services.forEach { add(Tab(it.name, Screen.Library(it))) }
+            if (config.calendar) add(Tab("Calendar", Screen.Calendar))
             if (config.downloads) add(Tab("Downloads", Screen.Downloads))
             if (config.files) add(Tab("Files", Screen.Files))
             add(Tab("Settings", Screen.Settings, Icons.Filled.Settings))
@@ -326,6 +328,16 @@ private fun ScreenContent(
             onDone = pop,
         )
         is Screen.Player -> PlayerScreen(ref = screen.ref, onExit = pop)
+        Screen.Calendar -> CalendarScreen(onOpen = { e ->
+            // Prefer the rich Home title page; fall back to the Sonarr/Radarr page.
+            val hub = config.services.firstOrNull { it.kind == "hub" }
+            val open = e.open
+            val target = config.services.firstOrNull { it.key == e.svc }
+            when {
+                hub != null && open != null -> push(Screen.Detail(hub, open))
+                target != null -> push(Screen.Detail(target, e.id))
+            }
+        })
         Screen.Downloads -> TopInset { DownloadsScreen() }
         Screen.Files -> TopInset { FilesScreen() }
         Screen.Settings -> TopInset { settings() }

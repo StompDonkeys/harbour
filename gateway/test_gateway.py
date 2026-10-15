@@ -661,3 +661,47 @@ def test_apk_v2(client):
     responses.get("https://x/v2", body=b"V2APK")
     r = client.get("/HarbourV2.apk")
     assert r.status_code == 200 and r.data == b"V2APK"
+
+
+@responses.activate
+def test_calendar(client):
+    local = datetime.now().astimezone()
+    today = local.date()
+    past = local - timedelta(days=2)
+    fut = local + timedelta(days=3)
+    show = dict(SERIES[0], tmdbId=95396, runtime=45)
+    responses.get("http://nas:8989/api/v3/calendar", json=[
+        {"id": 1, "seriesId": 1, "seasonNumber": 2, "episodeNumber": 1, "title": "Pilot2", "hasFile": True,
+         "monitored": True, "airDateUtc": iso(past.astimezone(timezone.utc)), "series": show},
+        {"id": 2, "seriesId": 1, "seasonNumber": 2, "episodeNumber": 2, "title": "Gone", "hasFile": False,
+         "monitored": True, "airDateUtc": iso((past + timedelta(hours=1)).astimezone(timezone.utc)), "series": show},
+        {"id": 3, "seriesId": 1, "seasonNumber": 2, "episodeNumber": 3, "title": "Soon", "hasFile": False,
+         "monitored": True, "airDateUtc": iso(fut.astimezone(timezone.utc)), "series": show,
+         "finaleType": "season"},
+        {"id": 4, "seriesId": 1, "seasonNumber": 2, "episodeNumber": 4, "title": "Way out", "hasFile": False,
+         "monitored": True, "airDateUtc": iso((local + timedelta(days=60)).astimezone(timezone.utc)), "series": show},
+    ])
+    responses.get("http://nas:8989/api/v3/queue", json={"records": [{"episodeId": 2}]})
+    responses.get("http://nas:7878/api/v3/calendar", json=[
+        movie(60, tmdbId=600, hasFile=False, inCinemas=(today - timedelta(days=1)).isoformat() + "T00:00:00Z",
+              digitalRelease=(today + timedelta(days=5)).isoformat() + "T00:00:00Z")])
+    responses.get("http://nas:7878/api/v3/queue", json={"records": []})
+    responses.get("http://nas:7879/api/v3/calendar", status=500, json={"message": "down"})
+    start, end = (today - timedelta(days=7)).isoformat(), (today + timedelta(days=14)).isoformat()
+    r = client.get(f"/api/calendar?start={start}&end={end}", headers=H)
+    assert r.status_code == 200, r.data
+    d = r.get_json()
+    ents = d["entries"]
+    by = {e["key"]: e for e in ents}
+    assert by["sonarr:sonarr:e1"]["status"] == "downloaded" and by["sonarr:sonarr:e1"]["tag"] == "New season"
+    assert by["sonarr:sonarr:e2"]["status"] == "downloading"
+    assert by["sonarr:sonarr:e3"]["status"] == "upcoming" and by["sonarr:sonarr:e3"]["tag"] == "Season finale"
+    assert by["sonarr:sonarr:e3"]["label"].startswith("Airs ") and by["sonarr:sonarr:e3"]["open"] == "tv-95396"
+    assert "sonarr:sonarr:e4" not in by
+    cin = by["radarr:radarr:60:inCinemas"]
+    assert cin["status"] == "cinema" and cin["kind"] == "movie" and cin["open"] == "movie-600"
+    assert by["radarr:radarr:60:digitalRelease"]["status"] == "upcoming"
+    assert [e["date"] for e in ents] == sorted(e["date"] for e in ents)
+    assert {s["name"] for s in d["sources"]} == {"TV", "Movies"}
+    assert client.get("/api/config", headers=H).get_json()["calendar"] is True
+    assert client.get("/api/calendar?start=2026-01-01&end=2026-06-01", headers=H).status_code == 400

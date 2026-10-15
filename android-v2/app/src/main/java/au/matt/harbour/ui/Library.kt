@@ -33,6 +33,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -105,17 +106,37 @@ private fun LibraryContent(
     var featured by remember(page) { mutableStateOf(page.hero ?: firstItem) }
     var featuredRow by remember(page) { mutableStateOf(page.rows.firstOrNull()?.title) }
     // Debounce the big backdrop so fast D-pad scrolling doesn't thrash image loads.
-    var backdrop by remember { mutableStateOf(featured?.let { gw.img(it.backdrop ?: it.poster) }) }
+    var backdrop by remember { mutableStateOf(featured?.let { gw.hero(it.backdrop ?: it.poster) }) }
     var shown by remember { mutableStateOf(featured) }
     LaunchedEffect(featured) {
         delay(220)
         shown = featured
-        backdrop = featured?.let { gw.img(it.backdrop ?: it.poster) }
+        backdrop = featured?.let { gw.hero(it.backdrop ?: it.poster) }
     }
 
     var lastFocus by rememberSaveable { mutableStateOf<String?>(null) }
     var grabPending by remember { mutableStateOf(true) }
     val target = lastFocus ?: firstItem?.let { "0:${it.key}" }
+
+    val listState = rememberLazyListState()
+    // -1 = the button row; 0.. = media rows. The focused row is pinned to the top of the list
+    // so it is always shown whole, and the rows above slide away instead of peeking.
+    var focusRow by remember { mutableIntStateOf(-2) }
+    LaunchedEffect(focusRow) {
+        when {
+            focusRow == -1 -> listState.animateScrollToItem(0)
+            focusRow == 0 -> {
+                // Keep the buttons in view above the first row when both fit; otherwise pin the row.
+                val info = listState.layoutInfo
+                val a = info.visibleItemsInfo.firstOrNull { it.index == 0 }
+                val b = info.visibleItemsInfo.firstOrNull { it.index == 1 }
+                val viewport = info.viewportEndOffset - info.viewportStartOffset
+                val fits = a != null && b != null && a.size + info.mainAxisItemSpacing + b.size <= viewport
+                listState.animateScrollToItem(if (fits) 0 else 1)
+            }
+            focusRow > 0 -> listState.animateScrollToItem(focusRow + 1)
+        }
+    }
 
     Box(Modifier.fillMaxSize()) {
         Backdrop(backdrop)
@@ -124,28 +145,32 @@ private fun LibraryContent(
             Crossfade(targetState = shown, animationSpec = tween(350), label = "hero") { item ->
                 InfoPanel(item, Modifier.fillMaxWidth().height(172.dp), label = featuredRow)
             }
-            Row(
-                Modifier.padding(start = 48.dp, top = 6.dp, bottom = 10.dp),
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                val f = shown
-                val ref = f?.ref
-                if (onPlay != null && f != null && ref != null) {
-                    TvButton(if (f.progress != null) "Resume" else "Play", { onPlay(ref) },
-                        style = "primary", icon = Icons.Filled.PlayArrow)
-                }
-                if (f != null) TvButton("More info", { onOpen(f.id) }, icon = Icons.Filled.Info)
-                TvButton("", { onBrowse(true) }, icon = Icons.Filled.Search)
-                if (!svc.isDiscover) TvButton("All titles", { onBrowse(false) }, icon = Icons.Filled.List)
-                TvButton("", onRefresh, icon = Icons.Filled.Refresh)
-            }
             LazyColumn(
-                state = rememberLazyListState(),
-                modifier = Modifier.weight(1f),
-                contentPadding = PaddingValues(top = 6.dp, bottom = 60.dp),
-                verticalArrangement = Arrangement.spacedBy(18.dp),
+                state = listState,
+                modifier = Modifier.weight(1f).fadeTop(),
+                contentPadding = PaddingValues(bottom = 200.dp),
+                verticalArrangement = Arrangement.spacedBy(14.dp),
             ) {
+                item(key = "__buttons") {
+                    Row(
+                        Modifier
+                            .padding(start = 48.dp, top = 12.dp, bottom = 4.dp)
+                            .onFocusChanged { if (it.hasFocus) focusRow = -1 },
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        val f = shown
+                        val ref = f?.ref
+                        if (onPlay != null && f != null && ref != null) {
+                            TvButton(if (f.progress != null) "Resume" else "Play", { onPlay(ref) },
+                                style = "primary", icon = Icons.Filled.PlayArrow)
+                        }
+                        if (f != null) TvButton("More info", { onOpen(f.id) }, icon = Icons.Filled.Info)
+                        TvButton("", { onBrowse(true) }, icon = Icons.Filled.Search)
+                        if (!svc.isDiscover) TvButton("All titles", { onBrowse(false) }, icon = Icons.Filled.List)
+                        TvButton("", onRefresh, icon = Icons.Filled.Refresh)
+                    }
+                }
                 if (page.rows.isEmpty()) {
                     item(key = "__empty") {
                         Text("Nothing here yet.", color = HColors.TextDim, fontSize = 16.sp,
@@ -163,6 +188,7 @@ private fun LibraryContent(
                             featured = item
                             featuredRow = row.title
                             lastFocus = key
+                            focusRow = ri
                         },
                         shouldGrab = { key -> grabPending && key == target },
                         onGrabbed = { grabPending = false },
