@@ -426,6 +426,7 @@ private fun TopInset(content: @Composable () -> Unit) {
  * The menu: a slim rail of icons on the left that widens to show names when you move onto it,
  * dimming the screen behind. OK opens a section; Right goes back to the screen.
  */
+@OptIn(ExperimentalComposeUiApi::class)
 @Composable
 private fun Rail(
     items: List<NavItem>,
