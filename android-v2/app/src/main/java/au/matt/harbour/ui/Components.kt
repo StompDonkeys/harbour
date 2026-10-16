@@ -728,7 +728,8 @@ object KeepVisible : androidx.compose.foundation.gestures.BringIntoViewSpec {
 
 @OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
-fun ScrollRules(spec: androidx.compose.foundation.gestures.BringIntoViewSpec, content: @Composable () -> Unit) {
+fun ScrollRules(auto: Boolean, content: @Composable () -> Unit) {
     androidx.compose.runtime.CompositionLocalProvider(
-        androidx.compose.foundation.gestures.LocalBringIntoViewSpec provides spec, content = content)
+        androidx.compose.foundation.gestures.LocalBringIntoViewSpec provides (if (auto) KeepVisible else NoAutoScroll),
+        content = content)
 }

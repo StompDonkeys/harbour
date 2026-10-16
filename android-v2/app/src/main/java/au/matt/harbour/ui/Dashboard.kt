@@ -108,7 +108,7 @@ private fun DashboardContent(hub: ServiceInfo, d: Dash, onOpen: (String) -> Unit
 
     Box(Modifier.fillMaxSize()) {
         Backdrop(art, dim = 1.3f)
-        ScrollRules(NoAutoScroll) { LazyColumn(
+        ScrollRules(auto = false) { LazyColumn(
             state = listState,
             modifier = Modifier.fillMaxSize().fadeTop(16.dp),
             contentPadding = PaddingValues(top = 26.dp, bottom = 220.dp),

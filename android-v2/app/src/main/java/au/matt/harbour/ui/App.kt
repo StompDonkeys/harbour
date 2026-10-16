@@ -304,7 +304,7 @@ private fun MainShell(config: GatewayConfig, settings: @Composable () -> Unit, u
                     .padding(start = inset)
                     .focusRequester(contentFocus)
                     .focusGroup(),
-            ) { ScrollRules(KeepVisible) {
+            ) { ScrollRules(auto = true) {
                 AnimatedContent(
                     targetState = stack.lastIndex to screen,
                     transitionSpec = {
