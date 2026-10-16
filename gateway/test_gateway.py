@@ -962,3 +962,26 @@ def test_trailer_resolve_and_proxy(client, monkeypatch):
     assert responses.calls[-1].request.headers["User-Agent"] == "UA"
     assert client.get("/api/trailer/bad!id", headers=V2).status_code in (400, 404)
     assert len(calls) == 1  # cached
+
+
+@responses.activate
+def test_trailer_proxy_fetches_in_chunks(client, monkeypatch):
+    gw._YT["chunkKEY123"] = (__import__("time").time(), {"title": "T", "duration": 1, "streams": [
+        {"url": "https://rr2.googlevideo.com/v", "headers": {}, "height": 720}]})
+    data = bytes(range(26))
+    seen = []
+
+    def cb(req):
+        a, b = map(int, req.headers["Range"].split("=")[1].split("-"))
+        seen.append((a, b))
+        part = data[a:b + 1]
+        return 206, {"Content-Range": f"bytes {a}-{a + len(part) - 1}/{len(data)}", "Content-Type": "video/mp4"}, part
+
+    responses.add_callback(responses.GET, "https://rr2.googlevideo.com/v", callback=cb)
+    monkeypatch.setattr(gw, "YT_CHUNK", 10)
+    r = client.get("/yt/chunkKEY123/0?t=tok", headers={"Range": "bytes=3-"})
+    assert r.status_code == 206 and r.data == data[3:]
+    assert r.headers["Content-Range"] == "bytes 3-25/26" and r.headers["Content-Length"] == "23"
+    assert seen == [(3, 12), (13, 22), (23, 25)]
+    r = client.get("/yt/chunkKEY123/0?t=tok")
+    assert r.status_code == 200 and r.data == data

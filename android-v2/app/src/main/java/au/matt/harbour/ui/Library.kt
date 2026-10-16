@@ -145,7 +145,7 @@ private fun LibraryContent(
             Crossfade(targetState = shown, animationSpec = tween(350), label = "hero") { item ->
                 InfoPanel(item, Modifier.fillMaxWidth().height(172.dp), label = featuredRow)
             }
-            LazyColumn(
+            ScrollRules(NoAutoScroll) { LazyColumn(
                 state = listState,
                 modifier = Modifier.weight(1f).fadeTop(),
                 contentPadding = PaddingValues(bottom = 200.dp),
@@ -194,7 +194,7 @@ private fun LibraryContent(
                         onGrabbed = { grabPending = false },
                     )
                 }
-            }
+            } }
         }
     }
 }
@@ -249,7 +249,7 @@ fun MediaRowView(
             fontWeight = FontWeight.Bold,
             modifier = Modifier.padding(start = edgePadding, bottom = 2.dp),
         )
-        LazyRow(
+        ScrollRules(KeepVisible) { LazyRow(
             contentPadding = PaddingValues(horizontal = edgePadding, vertical = 12.dp),
             horizontalArrangement = Arrangement.spacedBy(18.dp),
         ) {
@@ -278,7 +278,7 @@ fun MediaRowView(
                     SeeAllCard(onClick = { onSeeAll(key, row.title) })
                 }
             }
-        }
+        } }
     }
 }
 

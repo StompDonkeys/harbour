@@ -224,7 +224,14 @@ data class Stat(val label: String, val value: String, val sub: String? = null, v
 data class Marker(val kind: String, val status: String)
 
 @Serializable
-data class WeekDay(val date: String, val dow: String, val day: Int, val count: Int = 0, val markers: List<Marker> = emptyList())
+data class WeekDay(
+    val date: String,
+    val dow: String,
+    val day: Int,
+    val count: Int = 0,
+    val markers: List<Marker> = emptyList(),
+    val entries: List<CalEntry> = emptyList(),
+)
 
 @Serializable
 data class Dash(

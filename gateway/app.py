@@ -240,6 +240,7 @@ class Arr(HomeCache):
         self.url = conf["url"].rstrip("/")
         self.key = conf["api_key"]
         self._cache = {}
+        self._refreshing_keys = set()
         self._lock = threading.Lock()
         self._hc_init()
 
@@ -275,10 +276,30 @@ class Arr(HomeCache):
     def command(self, body):
         return self.post("/command", body)
 
-    def cached(self, key, ttl, fn):
+    def cached(self, key, ttl, fn, stale=0):
+        """Cache fn() for ttl seconds. With `stale`, an older copy (up to that age) is returned
+        straight away while a background thread fetches a fresh one — the TV never waits on it."""
         with self._lock:
             hit = self._cache.get(key)
-        if hit and time.time() - hit[0] < ttl:
+        age = time.time() - hit[0] if hit else None
+        if hit and age < ttl:
+            return hit[1]
+        if hit and age < stale:
+            with self._lock:
+                busy = key in self._refreshing_keys
+                self._refreshing_keys.add(key)
+            if not busy:
+                def refresh():
+                    try:
+                        v = fn()
+                        with self._lock:
+                            self._cache[key] = (time.time(), v)
+                    except Exception as e:
+                        log.warning("refresh %s %s failed: %s", self.name, key, e)
+                    finally:
+                        with self._lock:
+                            self._refreshing_keys.discard(key)
+                threading.Thread(target=refresh, daemon=True).start()
             return hit[1]
         val = fn()
         with self._lock:
@@ -343,7 +364,7 @@ class Radarr(Arr):
     default_icon = "movie"
 
     def movies(self):
-        return self.cached("movies", 60, lambda: self.get("/movie"))
+        return self.cached("movies", 60, lambda: self.get("/movie"), stale=1800)
 
     @staticmethod
     def quality(m):
@@ -530,7 +551,7 @@ class Sonarr(Arr):
     default_icon = "tv"
 
     def series(self):
-        return self.cached("series", 60, lambda: self.get("/series"))
+        return self.cached("series", 60, lambda: self.get("/series"), stale=1800)
 
     def card(self, s, badge=None, tone=None, progress=None, subtitle=None, key=None):
         st = s.get("statistics") or {}
@@ -1341,6 +1362,7 @@ class Hub:
         self._lock = threading.Lock()
         self._dash = None
         self._dash_lock = threading.Lock()
+        self._dash_refreshing = False
 
     def info(self):
         return {"kind": self.kind, "inst": self.inst, "name": self.name, "icon": self.icon}
@@ -1534,9 +1556,32 @@ class Hub:
             raise ApiError("Bad item id")
         tid = int(tid)
         d = self._tmdb(mt, tid)
-        page = self.seerr.detail_from(mt, tid, d)
         title = d.get("title") or d.get("name") or ""
-        owned = self.owned()
+        coll = d.get("collection") or {}
+        # Read the request now: everything below runs at once on worker threads.
+        v2, who = is_v2(), plex_user_from_request()
+
+        def plex_lookup():
+            if not self.plex:
+                return None
+            token = safe(lambda: self.plex.token_for(*who), "plex token", None)
+            return safe(lambda: self.plex.find(mt, tid, title, token), "plex search", None) if token else None
+
+        got = par(
+            page=lambda: self.seerr.detail_from(mt, tid, d),
+            owned=self.owned,
+            ratings=lambda: self.ratings(mt, tid, d),
+            pm=plex_lookup,
+            r=lambda: safe(lambda: self.seerr.cached(f"recs-{mt}-{tid}", 3600, lambda: self.seerr._req(
+                "GET", f"/{mt}/{tid}/recommendations", {"page": 1}).get("results")), "recommendations", []),
+            s=lambda: safe(lambda: self.seerr.cached(f"sim-{mt}-{tid}", 3600, lambda: self.seerr._req(
+                "GET", f"/{mt}/{tid}/similar", {"page": 1}).get("results")), "similar", []),
+            c=lambda: safe(lambda: self.seerr.cached(f"coll-{coll['id']}", 3600, lambda: self.seerr._req(
+                "GET", f"/collection/{coll['id']}")).get("parts"), "collection", [])
+            if (v2 and coll.get("id")) else [],
+            logo=lambda: self.logo(mt, tid) if v2 else None,
+        )
+        page, owned, ratings, pm = got["page"], got["owned"], got["ratings"], got["pm"]
 
         # headline facts: director/creator, ratings
         extra = []
@@ -1546,8 +1591,7 @@ class Hub:
             extra.append(("Director", ", ".join(directors[:3])))
         else:
             extra.append(("Created by", ", ".join(c.get("name", "") for c in d.get("createdBy") or [])))
-        ratings = self.ratings(mt, tid, d)
-        if not is_v2():
+        if not v2:
             extra.append(("Ratings", join(*(f"{r['label']} {r['value']}" for r in ratings if r["label"] != "TMDB"))))
             if d.get("tagline"):
                 page["item"]["overview"] = f"“{d['tagline']}”\n\n{page['item'].get('overview') or ''}".strip()
@@ -1555,33 +1599,29 @@ class Hub:
 
         # Plex: watched state + play
         play_acts, plex_state = [], None
-        if self.plex:
-            user, pin = plex_user_from_request()
-            token = safe(lambda: self.plex.token_for(user, pin), "plex token", None)
-            pm = safe(lambda: self.plex.find(mt, tid, title, token), "plex search", None) if token else None
-            if pm:
-                if mt == "movie":
-                    if pm.get("viewOffset"):
-                        left = max(0, ((pm.get("duration") or 0) - pm["viewOffset"]) // 60000)
-                        plex_state = f"In progress · {left}m left"
-                    else:
-                        plex_state = "Watched" if pm.get("viewCount") else "Not watched"
+        if pm:
+            if mt == "movie":
+                if pm.get("viewOffset"):
+                    left = max(0, ((pm.get("duration") or 0) - pm["viewOffset"]) // 60000)
+                    plex_state = f"In progress · {left}m left"
                 else:
-                    plex_state = f"{pm.get('viewedLeafCount', 0)} of {pm.get('leafCount', 0)} episodes watched"
-                page["facts"].insert(0, {"label": "Plex", "value": plex_state})
-                rk = pm.get("ratingKey")
-                if is_v2():
-                    if mt == "movie" and pm.get("viewOffset"):
-                        left = max(0, ((pm.get("duration") or 0) - pm["viewOffset"]) // 60000)
-                        play_acts = [
-                            action("play", f"Resume · {left}m left", "primary", opens="play", arg=f"plex:{rk}"),
-                            action("play_start", "Play from start", opens="play", arg=f"plex:{rk}|start")]
-                    else:
-                        play_acts = [action("play", "Play" if mt == "movie" else "Play next", "primary",
-                                            opens="play", arg=f"plex:{rk}")]
+                    plex_state = "Watched" if pm.get("viewCount") else "Not watched"
+            else:
+                plex_state = f"{pm.get('viewedLeafCount', 0)} of {pm.get('leafCount', 0)} episodes watched"
+            page["facts"].insert(0, {"label": "Plex", "value": plex_state})
+            rk = pm.get("ratingKey")
+            if v2:
+                if mt == "movie" and pm.get("viewOffset"):
+                    left = max(0, ((pm.get("duration") or 0) - pm["viewOffset"]) // 60000)
+                    play_acts = [
+                        action("play", f"Resume · {left}m left", "primary", opens="play", arg=f"plex:{rk}"),
+                        action("play_start", "Play from start", opens="play", arg=f"plex:{rk}|start")]
                 else:
-                    play_acts = [action("plex", "▶  Play in Plex", "primary", opens="plex",
-                                        arg=f"{self.plex.machine_id()}|{rk}")]
+                    play_acts = [action("play", "Play" if mt == "movie" else "Play next", "primary",
+                                        opens="play", arg=f"plex:{rk}")]
+            else:
+                play_acts = [action("plex", "▶  Play in Plex", "primary", opens="plex",
+                                    arg=f"{self.plex.machine_id()}|{rk}")]
 
         videos = self.videos(d.get("relatedVideos") or [])
 
@@ -1590,34 +1630,26 @@ class Hub:
         page["people"] = [clean({"id": f"person-{c['id']}", "name": c.get("name") or "?",
                                  "role": c.get("character"), "photo": tmdb_img(c.get("profilePath"), "w185")})
                           for c in cast if c.get("id")]
-        coll = d.get("collection") or {}
-        v2 = is_v2()  # read now: the fetches below run on worker threads, outside this request
-        recs = par(
-            r=lambda: safe(lambda: self.seerr._req("GET", f"/{mt}/{tid}/recommendations", {"page": 1}).get("results"),
-                           "recommendations", []),
-            s=lambda: safe(lambda: self.seerr._req("GET", f"/{mt}/{tid}/similar", {"page": 1}).get("results"),
-                           "similar", []),
-            c=lambda: safe(lambda: self.seerr.cached(f"coll-{coll['id']}", 3600, lambda: self.seerr._req(
-                "GET", f"/collection/{coll['id']}")).get("parts"), "collection", [])
-            if (v2 and coll.get("id")) else [],
-            logo=lambda: self.logo(mt, tid) if v2 else None,
-        )
         rows = []
-        if recs["c"]:
-            parts = sorted(recs["c"], key=lambda p: p.get("releaseDate") or "9999")
+        if got["c"]:
+            parts = sorted(got["c"], key=lambda p: p.get("releaseDate") or "9999")
             rows.append(row(coll.get("name") or "Collection", [self.mark(c, owned) for c in self.seerr.cards(parts, "movie")]))
         rows += [
-            row("More like this", [self.mark(c, owned) for c in self.seerr.cards(recs["r"], mt)]),
-            row("Similar", [self.mark(c, owned) for c in self.seerr.cards(recs["s"], mt)]),
+            row("More like this", [self.mark(c, owned) for c in self.seerr.cards(got["r"], mt)]),
+            row("Similar", [self.mark(c, owned) for c in self.seerr.cards(got["s"], mt)]),
         ]
         page["rows"] = [r for r in rows if r["items"]]
 
-        if not is_v2():
+        if not v2:
             page["actions"][0:0] = play_acts
             trailer = next((v for v in videos if v["type"] == "Trailer"), videos[0] if videos else None)
             if trailer:
                 page["actions"].append(action("trailer", "Trailer", opens="youtube", arg=trailer["key"]))
             return page
+
+        # Have the first trailer ready before anyone presses the button.
+        if videos and trailers_available():
+            yt_prefetch(next((v for v in videos if v.get("type") == "Trailer"), videos[0])["key"])
 
         # ---- Harbour v2: one page that does everything for this title
         matches = self.seerr.library_matches(mt, d)
@@ -1631,7 +1663,7 @@ class Hub:
             providers=self.providers(d),
             seasonCards=self.season_cards(tid, d, matches) if mt == "tv" else [],
             seasons=[],
-            logo=recs["logo"],
+            logo=got["logo"],
         )
         page["item"]["backdrop"] = tmdb_img(d.get("backdropPath"), "w1280") or page["item"].get("backdrop")
         return clean(page)
@@ -1970,11 +2002,28 @@ class Hub:
 
     # -- v2 Home: a dashboard
     def drop_dash(self):
-        self._dash = None
+        """Something changed: the next visit gets the old page instantly and a fresh one is built."""
+        if self._dash:
+            self._dash = (0, self._dash[1])
+
+    def refresh_dash(self):
+        if self._dash_refreshing:
+            return
+        self._dash_refreshing = True
+        try:
+            val = self._build_dash()
+            self._dash = (time.time(), val)
+        except Exception as e:
+            log.warning("dashboard refresh failed: %s", e)
+        finally:
+            self._dash_refreshing = False
 
     def dash(self):
         hit = self._dash
         if hit and time.time() - hit[0] < 60:
+            return hit[1]
+        if hit and hit[1].get("day") == datetime.now().astimezone().date().isoformat():
+            threading.Thread(target=self.refresh_dash, daemon=True).start()
             return hit[1]
         with self._dash_lock:
             hit = self._dash
@@ -2096,7 +2145,8 @@ class Hub:
             es = [e for e in ents if e["date"] == day.isoformat()]
             week.append({"date": day.isoformat(), "dow": "Today" if i == 0 else day.strftime("%a"),
                          "day": day.day, "count": len(es),
-                         "markers": [{"kind": e["kind"], "status": e["status"]} for e in es[:6]]})
+                         "markers": [{"kind": e["kind"], "status": e["status"]} for e in es[:6]],
+                         "entries": [dict(e, openId=open_id(e)) for e in es]})
 
         yesterday = (today - timedelta(days=1)).isoformat()
         ready = sorted((e for e in ents if e["kind"] == "tv" and e["status"] == "downloaded"
@@ -2139,6 +2189,7 @@ class Hub:
         hero = next((e.get("backdrop") for e in todays if e.get("backdrop")), None) \
             or next((c.get("backdrop") for r in rows for c in r["items"] if c.get("backdrop")), None)
         return {
+            "day": iso_today,
             "greeting": greet,
             "date": f"{now.strftime('%A')} {now.day} {now.strftime('%B')}",
             "hero": hero,
@@ -2699,12 +2750,13 @@ def trailers_available():
     return os.path.isdir(os.path.join(YT_DIR, "yt_dlp")) or importlib.util.find_spec("yt_dlp") is not None
 
 
-def yt_resolve(key, fresh=False):
-    if not re.fullmatch(r"[A-Za-z0-9_-]{6,20}", key or ""):
-        raise ApiError("Bad video id")
-    hit = _YT.get(key)
-    if hit and not fresh and time.time() - hit[0] < 3 * 3600:
-        return hit[1]
+YT_POOL = ThreadPoolExecutor(max_workers=2)   # at most two yt-dlp runs at once
+_YT_FUT = {}
+_YT_LOCK = threading.Lock()
+YT_CHUNK = 8 * 1024 * 1024   # YouTube cuts long open-ended reads short, so fetch in pieces
+
+
+def _yt_lookup(key):
     cmd = [sys.executable, "-m", "yt_dlp", "-J", "--no-warnings", "--no-playlist", "--no-progress",
            "-f", YT_FORMAT, f"https://www.youtube.com/watch?v={key}"]
     try:
@@ -2722,12 +2774,44 @@ def yt_resolve(key, fresh=False):
     for f in info.get("requested_formats") or [info]:
         if f.get("url"):
             streams.append({"url": f["url"], "headers": f.get("http_headers") or info.get("http_headers") or {},
-                            "height": f.get("height"), "vcodec": f.get("vcodec"), "acodec": f.get("acodec")})
+                            "height": f.get("height"), "size": f.get("filesize") or f.get("filesize_approx")})
     if not streams:
         raise ApiError("YouTube: no playable stream", 502)
     out = {"title": info.get("title"), "duration": info.get("duration"), "streams": streams}
     _YT[key] = (time.time(), out)
     return out
+
+
+def yt_prefetch(key):
+    """Start looking a trailer up in the background (no-op if it's cached or already running)."""
+    if not re.fullmatch(r"[A-Za-z0-9_-]{6,20}", key or ""):
+        return None
+    hit = _YT.get(key)
+    if hit and time.time() - hit[0] < 3 * 3600:
+        return None
+    with _YT_LOCK:
+        fut = _YT_FUT.get(key)
+        if fut is None or (fut.done() and fut.exception() is not None):
+            fut = YT_POOL.submit(_yt_lookup, key)
+            _YT_FUT[key] = fut
+            if len(_YT_FUT) > 200:
+                for k in [k for k, f in _YT_FUT.items() if f.done()][:100]:
+                    _YT_FUT.pop(k, None)
+        return fut
+
+
+def yt_resolve(key, fresh=False):
+    if not re.fullmatch(r"[A-Za-z0-9_-]{6,20}", key or ""):
+        raise ApiError("Bad video id")
+    if fresh:
+        _YT.pop(key, None)
+        with _YT_LOCK:
+            _YT_FUT.pop(key, None)
+    hit = _YT.get(key)
+    if hit and time.time() - hit[0] < 3 * 3600:
+        return hit[1]
+    fut = yt_prefetch(key)
+    return fut.result(timeout=120) if fut else _YT[key][1]
 
 
 def yt_update_loop():
@@ -2955,6 +3039,8 @@ def warm_loop():
     while True:
         for s in list(SERVICES.values()):
             s.refresh_home()
+        if HUB:
+            HUB.refresh_dash()
         time.sleep(240)
 
 
@@ -3216,22 +3302,61 @@ def trailer(key):
 
 @app.get("/yt/<key>/<int:i>")
 def yt_stream(key, i):
-    """Relay one trailer stream to the TV (Range requests pass straight through, so seeking works)."""
+    """Relay one trailer stream to the TV. Whatever range the player asks for, the gateway fetches
+    it from YouTube in 8 MB pieces — YouTube stalls long single reads, which froze trailers."""
+    rng = request.headers.get("Range", "")
+    m = re.fullmatch(r"bytes=(\d+)-(\d*)", rng.strip())
+    start = int(m.group(1)) if m else 0
+    want_end = int(m.group(2)) if m and m.group(2) else None
+
+    def fetch(st, a, b):
+        h = dict(st["headers"])
+        h["Range"] = f"bytes={a}-{b}"
+        return requests.get(st["url"], headers=h, stream=True, timeout=30)
+
     for attempt in (0, 1):
         t = yt_resolve(key, fresh=attempt == 1)
         if i >= len(t["streams"]):
             return Response(status=404)
         st = t["streams"][i]
-        headers = dict(st["headers"])
-        if request.headers.get("Range"):
-            headers["Range"] = request.headers["Range"]
-        r = requests.get(st["url"], headers=headers, stream=True, timeout=30)
+        first_end = start + YT_CHUNK - 1 if want_end is None else min(want_end, start + YT_CHUNK - 1)
+        r = fetch(st, start, first_end)
         if r.status_code == 403 and attempt == 0:  # links expire — look it up again once
             r.close()
             continue
-        out = {k: r.headers[k] for k in ("Content-Type", "Content-Length", "Content-Range") if k in r.headers}
-        out["Accept-Ranges"] = "bytes"
-        return Response(stream_with_context(r.iter_content(256 * 1024)), status=r.status_code, headers=out)
+        if r.status_code not in (200, 206):
+            r.close()
+            return Response(status=r.status_code)
+        total = None
+        cr = r.headers.get("Content-Range", "")
+        if "/" in cr and cr.rsplit("/", 1)[1].isdigit():
+            total = int(cr.rsplit("/", 1)[1])
+        elif r.status_code == 200 and r.headers.get("Content-Length", "").isdigit():
+            total = int(r.headers["Content-Length"])
+        end = (min(want_end, total - 1) if want_end is not None else total - 1) if total else first_end
+        ctype = r.headers.get("Content-Type", "video/mp4")
+
+        def body(r=r, st=st, end=end):
+            pos = start
+            resp = r
+            while True:
+                for chunk in resp.iter_content(256 * 1024):
+                    pos += len(chunk)
+                    yield chunk
+                resp.close()
+                if pos > end:
+                    return
+                resp = fetch(st, pos, min(end, pos + YT_CHUNK - 1))
+                if resp.status_code not in (200, 206):
+                    resp.close()
+                    return
+
+        headers = {"Content-Type": ctype, "Accept-Ranges": "bytes", "Content-Length": str(end - start + 1)}
+        status = 200
+        if m:
+            status = 206
+            headers["Content-Range"] = f"bytes {start}-{end}/{total if total else '*'}"
+        return Response(stream_with_context(body()), status=status, headers=headers)
     return Response(status=502)
 
 

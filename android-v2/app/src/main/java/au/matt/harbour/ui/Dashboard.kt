@@ -1,6 +1,7 @@
 package au.matt.harbour.ui
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -31,6 +32,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
@@ -102,10 +104,11 @@ private fun DashboardContent(hub: ServiceInfo, d: Dash, onOpen: (String) -> Unit
         }
     }
     val firstFocus = remember { FocusRequester() }
+    var grabbed by androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf(false) }
 
     Box(Modifier.fillMaxSize()) {
         Backdrop(art, dim = 1.3f)
-        LazyColumn(
+        ScrollRules(NoAutoScroll) { LazyColumn(
             state = listState,
             modifier = Modifier.fillMaxSize().fadeTop(16.dp),
             contentPadding = PaddingValues(top = 26.dp, bottom = 220.dp),
@@ -121,13 +124,15 @@ private fun DashboardContent(hub: ServiceInfo, d: Dash, onOpen: (String) -> Unit
                         }
                         d.alerts.take(2).forEach { a ->
                             Spacer(Modifier.width(8.dp))
-                            Text("⚠  ${a.text}", fontSize = 11.sp, color = Color.White, maxLines = 1,
+                            val tone = if (a.tone == "danger") HColors.Danger else HColors.Warn
+                            Text("⚠  ${a.text}", fontSize = 11.sp, color = HColors.Text, maxLines = 1,
                                 overflow = TextOverflow.Ellipsis,
                                 modifier = Modifier
                                     .clip(RoundedCornerShape(8.dp))
-                                    .background((if (a.tone == "danger") HColors.Danger else HColors.Warn).copy(alpha = 0.85f))
+                                    .background(tone.copy(alpha = 0.18f))
+                                    .border(1.dp, tone.copy(alpha = 0.6f), RoundedCornerShape(8.dp))
                                     .padding(horizontal = 10.dp, vertical = 5.dp)
-                                    .width(220.dp))
+                                    .width(230.dp))
                         }
                     }
                     if (d.stats.isNotEmpty()) {
@@ -138,26 +143,18 @@ private fun DashboardContent(hub: ServiceInfo, d: Dash, onOpen: (String) -> Unit
                 }
             }
             item(key = "today") {
-                Row(
-                    Modifier
+                WeekAgenda(
+                    week = d.week,
+                    firstFocus = firstFocus,
+                    onOpen = { e -> onOpen(e.openId ?: e.open ?: "${e.svc}/${e.id}") },
+                    onFocusedEntry = { e -> e.backdrop?.let { artUrl = it } },
+                    onDay = onCalendarDay,
+                    grab = !grabbed,
+                    onGrabbed = { grabbed = true },
+                    modifier = Modifier
                         .padding(start = 40.dp, end = 36.dp)
                         .onFocusChanged { if (it.hasFocus) focusRow = -1 },
-                    horizontalArrangement = Arrangement.spacedBy(14.dp),
-                ) {
-                    TodayPanel(
-                        entries = d.today,
-                        firstFocus = firstFocus,
-                        onOpen = { e -> onOpen(e.openId ?: e.open ?: "${e.svc}/${e.id}") },
-                        onFocused = { e -> e.backdrop?.let { artUrl = it } },
-                        onMore = { d.week.firstOrNull()?.let { onCalendarDay(it.date) } },
-                        modifier = Modifier.weight(1.15f),
-                    )
-                    WeekPanel(d.week, onDay = onCalendarDay, modifier = Modifier.weight(1f))
-                }
-                LaunchedEffect(Unit) {
-                    delay(80)
-                    runCatching { firstFocus.requestFocus() }
-                }
+                )
             }
             itemsIndexed(d.rows, key = { i, r -> "row$i:${r.title}" }) { ri, row ->
                 MediaRowView(
@@ -174,7 +171,7 @@ private fun DashboardContent(hub: ServiceInfo, d: Dash, onOpen: (String) -> Unit
                     edgePadding = 40.dp,
                 )
             }
-        }
+        } }
     }
 }
 
@@ -193,69 +190,141 @@ private fun StatTile(s: Stat, modifier: Modifier) {
     }
 }
 
-/** Today's episodes and releases — the first thing focused on Home. */
+/**
+ * The week at a glance: seven day tabs along the top (moving onto one shows that day), and the
+ * day's episodes and movies underneath — today's first. OK on a day opens the full calendar.
+ */
 @Composable
-private fun TodayPanel(
-    entries: List<CalEntry>,
+private fun WeekAgenda(
+    week: List<WeekDay>,
     firstFocus: FocusRequester,
     onOpen: (CalEntry) -> Unit,
-    onFocused: (CalEntry) -> Unit,
-    onMore: () -> Unit,
+    onFocusedEntry: (CalEntry) -> Unit,
+    onDay: (String) -> Unit,
+    grab: Boolean,
+    onGrabbed: () -> Unit,
     modifier: Modifier,
 ) {
-    GlassPanel(modifier.height(236.dp), shape = RoundedCornerShape(20.dp)) {
-        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(start = 4.dp)) {
-                Text("OUT TODAY", fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.4.sp,
-                    color = HColors.TextDim, modifier = Modifier.weight(1f))
-                if (entries.isNotEmpty()) {
-                    val ready = entries.count { it.status == "downloaded" }
-                    Text(if (ready > 0) "$ready ready to watch" else "${entries.size} today", fontSize = 11.sp,
-                        color = if (ready > 0) HColors.Ok else HColors.TextDim, fontWeight = FontWeight.SemiBold)
-                }
+    var sel by remember { mutableIntStateOf(0) }
+    val day = week.getOrNull(sel)
+    val entries = day?.entries.orEmpty()
+    val chipFr = remember(week.size) { List(week.size) { FocusRequester() } }
+    GlassPanel(modifier.fillMaxWidth(), shape = RoundedCornerShape(20.dp)) {
+        Column(Modifier.padding(14.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(start = 4.dp, end = 4.dp)) {
+                Text(
+                    if (sel == 0) "OUT TODAY" else (day?.let { "${it.dow.uppercase()} ${it.day}" } ?: ""),
+                    fontSize = 12.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.4.sp, color = HColors.TextDim,
+                    modifier = Modifier.weight(1f),
+                )
+                val ready = entries.count { it.status == "downloaded" }
+                val tv = entries.count { it.kind == "tv" }
+                val mv = entries.count { it.kind == "movie" }
+                Text(
+                    listOfNotNull(
+                        if (ready > 0) "$ready ready to watch" else null,
+                        if (tv > 0) "$tv episode${if (tv != 1) "s" else ""}" else null,
+                        if (mv > 0) "$mv movie${if (mv != 1) "s" else ""}" else null,
+                    ).joinToString("  ·  "),
+                    fontSize = 12.sp, fontWeight = FontWeight.SemiBold,
+                    color = if (ready > 0) HColors.Ok else HColors.TextDim,
+                )
             }
-            if (entries.isEmpty()) {
-                Box(Modifier.fillMaxWidth().weight(1f), contentAlignment = Alignment.Center) {
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        Text("Nothing new today", fontSize = 18.sp, fontWeight = FontWeight.Bold)
-                        Text("A good night for the backlog.", fontSize = 13.sp, color = HColors.TextDim)
-                        Spacer(Modifier.height(12.dp))
-                        TvButton("Open calendar", onMore, focusRequester = firstFocus)
+            Spacer(Modifier.height(10.dp))
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                week.forEachIndexed { i, wd ->
+                    FocusBox(
+                        onClick = { onDay(wd.date) },
+                        modifier = Modifier.weight(1f),
+                        shape = RoundedCornerShape(12.dp),
+                        focusedScale = 1.05f,
+                        borderWidth = 0.dp,
+                        onFocused = { sel = i },
+                        focusRequester = chipFr[i],
+                    ) { f ->
+                        val on = i == sel
+                        Column(
+                            Modifier
+                                .fillMaxWidth()
+                                .height(58.dp)
+                                .background(when {
+                                    f -> HColors.Text
+                                    on -> Color.White.copy(alpha = 0.16f)
+                                    else -> Color.White.copy(alpha = 0.05f)
+                                }),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.Center,
+                        ) {
+                            val fg = if (f) Color(0xFF0A0A0B) else HColors.Text
+                            Row(verticalAlignment = Alignment.Bottom) {
+                                Text(if (i == 0) "Today" else wd.dow, fontSize = 11.sp, fontWeight = FontWeight.Bold,
+                                    color = if (f) fg else HColors.TextDim)
+                                Spacer(Modifier.width(5.dp))
+                                Text("${wd.day}", fontSize = 16.sp, fontWeight = FontWeight.ExtraBold, color = fg)
+                            }
+                            Spacer(Modifier.height(5.dp))
+                            Row(horizontalArrangement = Arrangement.spacedBy(3.dp), verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier.height(7.dp)) {
+                                wd.markers.take(5).forEach { m ->
+                                    Box(Modifier.size(width = if (m.kind == "movie") 12.dp else 6.dp, height = 6.dp)
+                                        .clip(RoundedCornerShape(3.dp)).background(calStatusColor(m.status)))
+                                }
+                            }
+                        }
                     }
                 }
-            } else {
-                val shown = entries.take(if (entries.size > 4) 3 else 4)
-                shown.forEachIndexed { i, e ->
-                    TodayRow(e, if (i == 0) firstFocus else null, { onOpen(e) }, { onFocused(e) })
+            }
+            Spacer(Modifier.height(10.dp))
+            if (entries.isEmpty()) {
+                Box(Modifier.fillMaxWidth().height(110.dp), contentAlignment = Alignment.Center) {
+                    Text(if (sel == 0) "Nothing new today — a good night for the backlog." else "Nothing on this day.",
+                        fontSize = 14.sp, color = HColors.TextDim)
                 }
-                if (entries.size > shown.size) {
-                    FocusBox(onClick = onMore, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(12.dp),
-                        focusedScale = 1.02f, borderWidth = 0.dp) { f ->
-                        Text("+ ${entries.size - shown.size} more today  ›", fontSize = 13.sp, fontWeight = FontWeight.Bold,
-                            color = if (f) Color(0xFF0A0A0B) else HColors.TextDim,
-                            modifier = Modifier.fillMaxWidth().background(if (f) HColors.Text else Color.Transparent)
-                                .padding(horizontal = 12.dp, vertical = 8.dp))
+            } else {
+                val shown = if (entries.size > 4) entries.take(3) else entries
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    for (pair in (0 until 4).chunked(2)) {
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            pair.forEach { idx ->
+                                val m = Modifier.weight(1f).focusProperties { up = chipFr[sel] }
+                                when {
+                                    idx < shown.size -> AgendaRow(shown[idx], if (idx == 0) firstFocus else null,
+                                        m, { onOpen(shown[idx]) }, { onFocusedEntry(shown[idx]) })
+                                    idx == 3 && entries.size > 4 -> MoreRow(entries.size - 3, m) { day?.let { onDay(it.date) } }
+                                    else -> Spacer(m.height(52.dp))
+                                }
+                            }
+                        }
                     }
                 }
             }
         }
     }
+    // Focus lands on today's first item (or today's tab when there's nothing today).
+    if (grab) {
+        LaunchedEffect(Unit) {
+            delay(80)
+            if (week.firstOrNull()?.entries.isNullOrEmpty()) runCatching { chipFr.firstOrNull()?.requestFocus() }
+            else runCatching { firstFocus.requestFocus() }
+            onGrabbed()
+        }
+    }
 }
 
 @Composable
-private fun TodayRow(e: CalEntry, fr: FocusRequester?, onClick: () -> Unit, onFocused: () -> Unit) {
+private fun AgendaRow(e: CalEntry, fr: FocusRequester?, modifier: Modifier, onClick: () -> Unit, onFocused: () -> Unit) {
     val gw = LocalGateway.current
-    FocusBox(onClick = onClick, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(12.dp),
-        focusedScale = 1.02f, borderWidth = 0.dp, onFocused = onFocused, focusRequester = fr) { f ->
+    FocusBox(onClick = onClick, modifier = modifier, shape = RoundedCornerShape(12.dp),
+        focusedScale = 1.03f, borderWidth = 0.dp, onFocused = onFocused, focusRequester = fr) { f ->
         Row(
-            Modifier.fillMaxWidth().height(38.dp)
-                .background(if (f) HColors.Text else Color.White.copy(alpha = 0.06f)),
+            Modifier.fillMaxWidth().height(52.dp)
+                .background(if (f) HColors.Text else Color.White.copy(alpha = 0.07f)),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Box(Modifier.width(4.dp).fillMaxHeight().background(calStatusColor(e.status)))
             Spacer(Modifier.width(10.dp))
             AsyncImage(model = gw.img(e.poster), contentDescription = null, contentScale = ContentScale.Crop,
-                modifier = Modifier.size(width = 24.dp, height = 36.dp).clip(RoundedCornerShape(4.dp))
+                modifier = Modifier.size(width = 28.dp, height = 42.dp).clip(RoundedCornerShape(4.dp))
                     .background(HColors.Surface))
             Spacer(Modifier.width(10.dp))
             val fg = if (f) Color(0xFF0A0A0B) else HColors.Text
@@ -269,7 +338,8 @@ private fun TodayRow(e: CalEntry, fr: FocusRequester?, onClick: () -> Unit, onFo
             Text(
                 when (e.status) {
                     "downloaded" -> "Ready"
-                    "upcoming" -> e.time ?: "Later"
+                    "upcoming" -> e.time ?: "Soon"
+                    "cinema" -> "Cinemas"
                     else -> e.label
                 },
                 fontSize = 11.sp, fontWeight = FontWeight.Bold, maxLines = 1,
@@ -280,46 +350,14 @@ private fun TodayRow(e: CalEntry, fr: FocusRequester?, onClick: () -> Unit, onFo
     }
 }
 
-/** The next seven days at a glance; each day opens the calendar there. */
 @Composable
-private fun WeekPanel(week: List<WeekDay>, onDay: (String) -> Unit, modifier: Modifier) {
-    GlassPanel(modifier.height(236.dp), shape = RoundedCornerShape(20.dp)) {
-        Column(Modifier.padding(14.dp)) {
-            Text("THIS WEEK", fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.4.sp,
-                color = HColors.TextDim, modifier = Modifier.padding(start = 4.dp, bottom = 10.dp))
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                week.forEach { day ->
-                    FocusBox(onClick = { onDay(day.date) }, modifier = Modifier.weight(1f), shape = RoundedCornerShape(12.dp),
-                        focusedScale = 1.08f, borderWidth = 0.dp) { f ->
-                        Column(
-                            Modifier.fillMaxWidth().height(176.dp)
-                                .background(if (f) HColors.Text else Color.White.copy(alpha = if (day.dow == "Today") 0.12f else 0.05f))
-                                .padding(vertical = 10.dp),
-                            horizontalAlignment = Alignment.CenterHorizontally,
-                        ) {
-                            val fg = if (f) Color(0xFF0A0A0B) else HColors.Text
-                            Text(if (day.dow == "Today") "TDY" else day.dow.uppercase(), fontSize = 10.sp,
-                                fontWeight = FontWeight.Bold, letterSpacing = 0.8.sp,
-                                color = if (f) fg else HColors.TextDim)
-                            Text("${day.day}", fontSize = 20.sp, fontWeight = FontWeight.ExtraBold, color = fg)
-                            Spacer(Modifier.height(8.dp))
-                            Column(verticalArrangement = Arrangement.spacedBy(4.dp),
-                                horizontalAlignment = Alignment.CenterHorizontally) {
-                                day.markers.take(6).forEach { m ->
-                                    Box(Modifier.size(width = if (m.kind == "movie") 18.dp else 8.dp, height = 8.dp)
-                                        .clip(if (m.kind == "movie") RoundedCornerShape(3.dp) else CircleShape)
-                                        .background(calStatusColor(m.status)))
-                                }
-                            }
-                            Spacer(Modifier.weight(1f))
-                            if (day.count > 0) {
-                                Text("${day.count}", fontSize = 11.sp, fontWeight = FontWeight.Bold,
-                                    color = if (f) fg else HColors.TextDim)
-                            }
-                        }
-                    }
-                }
-            }
+private fun MoreRow(more: Int, modifier: Modifier, onClick: () -> Unit) {
+    FocusBox(onClick = onClick, modifier = modifier, shape = RoundedCornerShape(12.dp),
+        focusedScale = 1.03f, borderWidth = 0.dp) { f ->
+        Box(Modifier.fillMaxWidth().height(52.dp).background(if (f) HColors.Text else Color.White.copy(alpha = 0.07f)),
+            contentAlignment = Alignment.Center) {
+            Text("+ $more more  ›  open calendar", fontSize = 13.sp, fontWeight = FontWeight.Bold,
+                color = if (f) Color(0xFF0A0A0B) else HColors.TextDim)
         }
     }
 }

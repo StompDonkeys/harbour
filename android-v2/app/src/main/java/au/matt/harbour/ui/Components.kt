@@ -406,7 +406,7 @@ fun LandscapeCard(
                 if (item.progress != null) ProgressStrip(item.progress, Modifier.align(Alignment.BottomCenter))
             }
         }
-        Spacer(Modifier.height(if (focused) 12.dp else 8.dp))
+        Spacer(Modifier.height(10.dp))
         Text(item.title, fontSize = 14.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis,
             color = if (focused) HColors.Text else HColors.Text.copy(alpha = 0.86f),
             modifier = Modifier.padding(start = 2.dp))
@@ -701,3 +701,34 @@ fun Modifier.fadeTop(height: Dp = 14.dp): Modifier = this
             blendMode = androidx.compose.ui.graphics.BlendMode.DstIn,
         )
     }
+
+
+/**
+ * Scrolling rules for focus. On TVs Compose scrolls a focused item toward a fixed point on screen;
+ * on pages where we pin rows ourselves that fights our scrolling and the page bounces.
+ */
+@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
+object NoAutoScroll : androidx.compose.foundation.gestures.BringIntoViewSpec {
+    override fun calculateScrollDistance(offset: Float, size: Float, containerSize: Float): Float = 0f
+}
+
+/** Scroll just enough to show the focused item (the phone/tablet behaviour). */
+@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
+object KeepVisible : androidx.compose.foundation.gestures.BringIntoViewSpec {
+    override fun calculateScrollDistance(offset: Float, size: Float, containerSize: Float): Float {
+        val end = offset + size
+        return when {
+            offset >= 0f && end <= containerSize -> 0f
+            offset < 0f && end > containerSize -> 0f
+            kotlin.math.abs(offset) < kotlin.math.abs(end - containerSize) -> offset
+            else -> end - containerSize
+        }
+    }
+}
+
+@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
+@Composable
+fun ScrollRules(spec: androidx.compose.foundation.gestures.BringIntoViewSpec, content: @Composable () -> Unit) {
+    androidx.compose.runtime.CompositionLocalProvider(
+        androidx.compose.foundation.gestures.LocalBringIntoViewSpec provides spec, content = content)
+}

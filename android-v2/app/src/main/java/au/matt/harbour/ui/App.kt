@@ -13,7 +13,9 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Search
-import androidx.compose.ui.focus.focusRestorer
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.animation.AnimatedContent
@@ -301,9 +303,8 @@ private fun MainShell(config: GatewayConfig, settings: @Composable () -> Unit, u
                     .fillMaxSize()
                     .padding(start = inset)
                     .focusRequester(contentFocus)
-                    .focusRestorer()
                     .focusGroup(),
-            ) {
+            ) { ScrollRules(KeepVisible) {
                 AnimatedContent(
                     targetState = stack.lastIndex to screen,
                     transitionSpec = {
@@ -319,7 +320,7 @@ private fun MainShell(config: GatewayConfig, settings: @Composable () -> Unit, u
                         }
                     }
                 }
-            }
+            } }
             AnimatedVisibility(
                 visible = showRail,
                 enter = fadeIn(tween(250)) + slideInHorizontally(tween(300)) { -it },
@@ -331,6 +332,7 @@ private fun MainShell(config: GatewayConfig, settings: @Composable () -> Unit, u
                     requesters = requesters,
                     onSelect = { selectTab(it) },
                     onFocusChanged = { railFocused = it },
+                    onExit = { runCatching { contentFocus.requestFocus() } },
                     dotOn = if (updateAvailable) items.lastIndex else -1,
                 )
             }
@@ -434,6 +436,7 @@ private fun Rail(
     requesters: List<FocusRequester>,
     onSelect: (Int) -> Unit,
     onFocusChanged: (Boolean) -> Unit,
+    onExit: () -> Unit,
     dotOn: Int,
 ) {
     var expanded by remember { mutableStateOf(false) }
@@ -460,6 +463,14 @@ private fun Rail(
                     onFocusChanged(it.hasFocus)
                 }
                 .focusProperties { enter = { requesters[selected] } }
+                .onPreviewKeyEvent { e ->
+                    // Right always goes back into the screen (the rail overlaps it, so don't rely on
+                    // geometry to find something to the right).
+                    if (e.nativeKeyEvent.keyCode == android.view.KeyEvent.KEYCODE_DPAD_RIGHT) {
+                        if (e.type == KeyEventType.KeyDown) onExit()
+                        true
+                    } else false
+                }
                 .focusGroup()
                 .padding(horizontal = 12.dp, vertical = 22.dp),
             verticalArrangement = Arrangement.spacedBy(4.dp),
