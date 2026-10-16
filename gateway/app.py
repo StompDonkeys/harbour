@@ -2388,6 +2388,49 @@ AUTH_ERRORS = {400: "wrong DSM username or password", 401: "DSM account disabled
                404: "2-step verification failed", 407: "IP blocked by DSM auto-block"}
 
 
+class _MultipartFile:
+    """A multipart/form-data body that reads the file from disk as it's sent (never all in memory)."""
+
+    def __init__(self, fields, file_field, filename, path):
+        self.boundary = f"----harbour{int(time.time() * 1000)}"
+        head = b""
+        for k, v in fields.items():
+            head += (f"--{self.boundary}\r\nContent-Disposition: form-data; name=\"{k}\"\r\n\r\n{v}\r\n").encode()
+        safe_name = filename.replace('"', "'")
+        head += (f"--{self.boundary}\r\nContent-Disposition: form-data; name=\"{file_field}\"; "
+                 f"filename=\"{safe_name}\"\r\nContent-Type: application/octet-stream\r\n\r\n").encode()
+        self.parts = [head, None, f"\r\n--{self.boundary}--\r\n".encode()]
+        self.f = open(path, "rb")
+        self.size = len(head) + os.path.getsize(path) + len(self.parts[2])
+        self.idx, self.off = 0, 0
+        self.content_type = f"multipart/form-data; boundary={self.boundary}"
+
+    def __len__(self):
+        return self.size
+
+    def read(self, n=-1):
+        n = n if n and n > 0 else 1 << 20
+        out = b""
+        while len(out) < n and self.idx < 3:
+            if self.idx == 1:
+                chunk = self.f.read(n - len(out))
+                if not chunk:
+                    self.idx += 1
+                    continue
+                out += chunk
+            else:
+                part = self.parts[self.idx]
+                chunk = part[self.off:self.off + n - len(out)]
+                out += chunk
+                self.off += len(chunk)
+                if self.off >= len(part):
+                    self.idx, self.off = self.idx + 1, 0
+        return out
+
+    def close(self):
+        self.f.close()
+
+
 class FileStation:
     def __init__(self, conf):
         self.url = conf["url"].rstrip("/")
@@ -2427,6 +2470,35 @@ class FileStation:
             sub = [e.get("code") for e in err.get("errors") or [] if isinstance(e, dict)]
             msg = FS_ERRORS.get(sub[0] if sub else code) or FS_ERRORS.get(code) or f"File Station error {code}"
             raise ApiError(msg, 400)
+        raise ApiError("File Station session error", 502)
+
+    def upload(self, folder, name, src_path):
+        """Stream a local file into a NAS folder (created if needed) via File Station's upload API."""
+        folder, name = self.check(folder), self.name_ok(name)
+        for attempt in range(2):
+            with self.lock:
+                if not self.sid:
+                    self.login()
+                sid = self.sid
+            body = _MultipartFile({"path": folder, "create_parents": "true", "overwrite": "true"},
+                                  "file", name, src_path)
+            try:
+                r = requests.post(f"{self.url}/webapi/entry.cgi",
+                                  params={"api": "SYNO.FileStation.Upload", "version": "2", "method": "upload",
+                                          "_sid": sid},
+                                  data=body, headers={"Content-Type": body.content_type,
+                                                      "Content-Length": str(len(body))},
+                                  timeout=900, verify=self.verify).json()
+            finally:
+                body.close()
+            if r.get("success"):
+                return f"{folder}/{name}"
+            code = (r.get("error") or {}).get("code")
+            if code in (106, 107, 119) and attempt == 0:
+                with self.lock:
+                    self.sid = None
+                continue
+            raise ApiError(FS_ERRORS.get(code) or f"File Station upload error {code}", 502)
         raise ApiError("File Station session error", 502)
 
     def run_task(self, api, version, timeout=180, **params):
@@ -3358,6 +3430,43 @@ def yt_stream(key, i):
             headers["Content-Range"] = f"bytes {start}-{end}/{total if total else '*'}"
         return Response(stream_with_context(body()), status=status, headers=headers)
     return Response(status=502)
+
+
+@app.post("/api/recording")
+def save_recording():
+    """Harbour's screen recordings: the TV streams the video here, the gateway saves it on the NAS."""
+    if not FILES:
+        raise ApiError("File Station isn't configured on the gateway", 404)
+    rc = CFG.get("recordings") or {}
+    folder = (rc.get("folder") if isinstance(rc, dict) else rc) or \
+        (f"{FILES.allowed[0]}/Harbour recordings" if FILES.allowed else None)
+    if not folder:
+        raise ApiError('Set "recordings": {"folder": "/share/folder"} in the gateway config')
+    name = re.sub(r"[^\w .()-]", "_", request.args.get("name") or
+                  f"Harbour {datetime.now():%Y-%m-%d %H.%M.%S}.mp4")[:120]
+    if not name.lower().endswith(".mp4"):
+        name += ".mp4"
+    import tempfile
+    fd, tmp = tempfile.mkstemp(suffix=".mp4", dir=os.environ.get("TMPDIR", "/tmp"))
+    size = 0
+    try:
+        with os.fdopen(fd, "wb") as out:
+            while True:
+                chunk = request.stream.read(1 << 20)
+                if not chunk:
+                    break
+                size += len(chunk)
+                out.write(chunk)
+        if size == 0:
+            raise ApiError("The recording was empty")
+        path = FILES.upload(folder, name, tmp)
+    finally:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+    log.info("saved screen recording %s (%s)", path, fmt_size(size))
+    return jsonify(path=path, size=size)
 
 
 @app.get("/api/calendar")

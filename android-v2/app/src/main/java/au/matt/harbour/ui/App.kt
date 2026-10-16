@@ -201,6 +201,7 @@ fun HarbourApp(prefs: Prefs) {
                     MainShell(cfg, settings, updateAvailable = update != null)
                 }
             }
+            RecordingOverlay()
             ToastHost(toaster, Modifier.align(Alignment.BottomCenter))
         }
     }

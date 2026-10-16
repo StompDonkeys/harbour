@@ -985,3 +985,25 @@ def test_trailer_proxy_fetches_in_chunks(client, monkeypatch):
     assert seen == [(3, 12), (13, 22), (23, 25)]
     r = client.get("/yt/chunkKEY123/0?t=tok")
     assert r.status_code == 200 and r.data == data
+
+
+@responses.activate
+def test_recording_saved_to_nas(client):
+    responses.post("http://nas:5000/webapi/auth.cgi", json={"success": True, "data": {"sid": "S1"}})
+    got = {}
+
+    def up(req):
+        body = req.body if isinstance(req.body, (bytes, bytearray)) else b"".join(iter(lambda: req.body.read(7), b""))
+        got["body"], got["url"], got["ct"] = body, req.url, req.headers["Content-Type"]
+        return 200, {}, json.dumps({"success": True})
+
+    responses.add_callback(responses.POST, "http://nas:5000/webapi/entry.cgi", callback=up)
+    video = os.urandom(3000)
+    r = client.post("/api/recording?name=Demo%201.mp4", data=video, headers=dict(H, **{"Content-Type": "video/mp4"}))
+    assert r.status_code == 200, r.data
+    assert r.get_json() == {"path": "/video/Harbour recordings/Demo 1.mp4", "size": 3000}
+    assert "SYNO.FileStation.Upload" in got["url"] and "_sid=S1" in got["url"]
+    b = got["body"]
+    assert b'name="path"\r\n\r\n/video/Harbour recordings\r\n' in b and b'filename="Demo 1.mp4"' in b
+    assert video in b and got["ct"].startswith("multipart/form-data; boundary=")
+    assert b.index(b'name="create_parents"') < b.index(b'name="file"')

@@ -183,6 +183,8 @@ fun SettingsScreen(
             updStatus?.let {
                 Text(it, color = HColors.TextDim, fontSize = 14.sp, modifier = Modifier.widthIn(max = 640.dp))
             }
+            Spacer(Modifier.height(10.dp))
+            RecordingSettings()
         }
     }
 
