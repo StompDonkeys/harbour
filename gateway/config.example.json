@@ -15,6 +15,9 @@
     "id": "seerr", "name": "Jellyseerr", "url": "http://192.168.4.68:5055", "api_key": "SEERR_API_KEY"
   },
 
+  "region": "AU",
+  "tmdb": { "api_key": "OPTIONAL_TMDB_READ_ACCESS_TOKEN" },
+
   "plex": {
     "url": "http://192.168.4.68:32400", "token": "YOUR_PLEX_TOKEN"
   },
