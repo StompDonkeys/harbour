@@ -29,7 +29,7 @@ from urllib.parse import quote, urlsplit
 import requests
 from flask import Flask, Response, has_request_context, jsonify, request, stream_with_context
 
-VERSION = "0.3.0"
+VERSION = "0.4.0"
 CONFIG_PATH = os.environ.get("HARBOUR_CONFIG", "/config/config.json")
 TMDB_IMG = "https://image.tmdb.org/t/p/"
 
