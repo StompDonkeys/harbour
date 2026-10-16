@@ -705,3 +705,260 @@ def test_calendar(client):
     assert {s["name"] for s in d["sources"]} == {"TV", "Movies"}
     assert client.get("/api/config", headers=H).get_json()["calendar"] is True
     assert client.get("/api/calendar?start=2026-01-01&end=2026-06-01", headers=H).status_code == 400
+
+
+# ---------------------------------------------------------------- v2: one page per title, seasons, dashboard
+
+V2 = dict(H, **{"X-Harbour-App": "2"})
+
+
+def _dune_movie_mocks():
+    plex_common()
+    responses.get("http://nas:5055/api/v1/movie/438631", json={
+        "id": 438631, "title": "Dune", "tagline": "Beyond fear", "overview": "Spice.", "releaseDate": "2021-09-15",
+        "runtime": 155, "voteAverage": 7.8, "genres": [{"name": "Sci-Fi"}, {"name": "Adventure"}],
+        "releases": {"results": [{"iso_3166_1": "AU", "release_dates": [{"certification": "M"}]}]},
+        "collection": {"id": 99, "name": "Dune Collection"},
+        "watchProviders": [{"iso_3166_1": "AU", "flatrate": [{"name": "Netflix", "logoPath": "/n.png"}]}],
+        "mediaInfo": {"id": 3, "status": 5},
+        "credits": {"cast": [], "crew": []},
+        "relatedVideos": [{"site": "YouTube", "type": "Featurette", "key": "fff", "name": "Making of"},
+                          {"site": "YouTube", "type": "Trailer", "key": "abc", "name": "Official trailer"}]})
+    responses.get("http://nas:5055/api/v1/movie/438631/ratingscombined",
+                  json={"imdb": {"criticsScore": 8.0}, "rt": {"criticsScore": 83, "audienceScore": 90}})
+    responses.get("http://nas:5055/api/v1/movie/438631/recommendations", json={"results": []})
+    responses.get("http://nas:5055/api/v1/movie/438631/similar", json={"results": []})
+    responses.get("http://nas:5055/api/v1/collection/99", json={"parts": [
+        {"id": 2, "title": "Dune: Part Two", "releaseDate": "2024-03-01"},
+        {"id": 438631, "title": "Dune", "releaseDate": "2021-09-15"}]})
+    responses.get("http://nas:5055/api/v1/service/radarr", json=[{"id": 1, "is4k": False}, {"id": 2, "is4k": True}])
+    hd = dict(MOVIES[1], tmdbId=438631, id=40, movieFile={"id": 400, "quality": {"quality": {"name": "WEBDL-1080p"}}})
+    responses.get("http://nas:7878/api/v3/movie", json=[hd])
+    responses.get("http://nas:7879/api/v3/movie", json=[dict(MOVIES[2], tmdbId=438631, id=41, hasFile=False,
+                                                             monitored=True, isAvailable=True)])
+    responses.get("http://nas:8989/api/v3/series", json=[])
+    responses.get("http://nas:32400/hubs/search", json={"MediaContainer": {"Hub": []}})
+
+
+@responses.activate
+def test_v2_movie_page(client):
+    _dune_movie_mocks()
+    d = client.get("/api/svc/hub/hub/item/movie-438631", headers=V2).get_json()
+    assert d["meta"] == ["2021", "M", "2h 35m", "Sci-Fi · Adventure"]
+    assert [r["label"] for r in d["ratings"]] == ["IMDb", "Rotten Tomatoes", "Audience", "TMDB"]
+    assert d["tagline"] == "Beyond fear" and not d["item"]["overview"].startswith("“")
+    assert d["videos"][0]["key"] == "abc" and d["videos"][0]["thumb"].endswith("/abc/mqdefault.jpg")
+    assert d["providers"] == [{"name": "Netflix", "logo": "https://image.tmdb.org/t/p/w92/n.png"}]
+    assert d["rows"][0]["title"] == "Dune Collection" and d["rows"][0]["items"][0]["title"] == "Dune"
+    tones = [c["tone"] for c in d["status"]]
+    assert tones[:2] == ["ok", "warn"] and "WEBDL-1080p" in d["status"][0]["text"]
+    acts = d["actions"]
+    by = [(a["id"], a["label"]) for a in acts]
+    assert by[0] == ("trailer", "Trailer") and acts[0]["opens"] == "trailer" and acts[0]["arg"] == "abc"
+    # in both HD and 4K: no "Add" buttons; the 4K copy is missing so there's a direct search for it
+    assert ("lib_search", "Search · Movies 4K") in by and not any(i == "request" for i, _ in by)
+    menus = [a for a in acts if a["id"] == "menu"]
+    assert [m["label"] for m in menus] == ["Movies", "Movies 4K", "More"]
+    hd_items = {a["id"]: a for a in menus[0]["items"]}
+    assert hd_items["lib_delete_file"]["arg"] == "radarr/radarr/40|400"
+    assert hd_items["releases"]["arg"] == "radarr/radarr/40|movie"
+
+    # actions pass through to the right Radarr and the page stays open
+    responses.delete("http://nas:7878/api/v3/moviefile/400", json={})
+    r = client.post("/api/svc/hub/hub/item/movie-438631/action", headers=V2,
+                    json={"action": "lib_delete_file", "arg": "radarr/radarr/40|400"}).get_json()
+    assert r["message"] == "File deleted" and r["refresh"] is True and r["close"] is False
+    responses.delete("http://nas:7879/api/v3/movie/41", json={})
+    r = client.post("/api/svc/hub/hub/item/movie-438631/action", headers=V2,
+                    json={"action": "lib_delete", "arg": "radarr/radarr-truehd/41"}).get_json()
+    assert r["close"] is False and "deleteFiles=false" in responses.calls[-1].request.url
+    # manual search + grab go to that Radarr too
+    responses.get("http://nas:7879/api/v3/release", json=[{"guid": "g1", "indexerId": 3, "title": "Dune.2160p",
+                                                            "quality": {"quality": {"name": "Bluray-2160p"}}}])
+    rel = client.get("/api/svc/hub/hub/item/movie-438631/releases?arg=radarr/radarr-truehd/41|movie", headers=V2)
+    assert rel.status_code == 200 and rel.get_json()["items"][0]["guid"] == "g1"
+    assert "movieId=41" in responses.calls[-1].request.url
+    responses.post("http://nas:7879/api/v3/release", json={})
+    g = client.post("/api/svc/hub/hub/item/movie-438631/grab", headers=V2,
+                    json={"guid": "g1", "indexerId": 3, "arg": "radarr/radarr-truehd/41|movie"})
+    assert g.status_code == 200, g.data
+    # v1 still gets the old page
+    old = client.get("/api/svc/hub/hub/item/movie-438631", headers=H).get_json()
+    assert "meta" not in old and any(a["opens"] == "youtube" for a in old["actions"] if "opens" in a)
+
+
+def _show_mocks():
+    plex_common()
+    responses.get("http://nas:5055/api/v1/tv/95396", json={
+        "id": 95396, "name": "Severance", "firstAirDate": "2022-02-17", "status": "Returning Series",
+        "numberOfSeasons": 2, "externalIds": {"tvdbId": 371980}, "genres": [{"name": "Drama"}],
+        "contentRatings": {"results": [{"iso_3166_1": "AU", "rating": "MA15+"}]},
+        "nextEpisodeToAir": {"airDate": "2099-01-01", "seasonNumber": 2, "episodeNumber": 3},
+        "seasons": [{"seasonNumber": 0, "episodeCount": 1, "name": "Specials"},
+                    {"seasonNumber": 1, "episodeCount": 2, "name": "Season 1", "posterPath": "/s1.jpg", "airDate": "2022-02-17"},
+                    {"seasonNumber": 2, "episodeCount": 3, "name": "Season 2", "airDate": "2025-01-17"}],
+        "mediaInfo": {"id": 8, "status": 4}, "credits": {"cast": [], "crew": []}, "relatedVideos": []})
+    responses.get("http://nas:5055/api/v1/tv/95396/ratings", json={"criticsScore": 97})
+    responses.get("http://nas:5055/api/v1/tv/95396/recommendations", json={"results": []})
+    responses.get("http://nas:5055/api/v1/tv/95396/similar", json={"results": []})
+    responses.get("http://nas:5055/api/v1/service/sonarr", json=[])
+    ser = dict(SERIES[0], id=7, tmdbId=95396, tvdbId=371980, runtime=55,
+               seasons=[{"seasonNumber": 1, "monitored": True, "statistics": {"episodeFileCount": 2, "totalEpisodeCount": 2}},
+                        {"seasonNumber": 2, "monitored": True, "statistics": {"episodeFileCount": 1, "totalEpisodeCount": 3}}],
+               statistics={"episodeFileCount": 3, "episodeCount": 5, "sizeOnDisk": 5e9})
+    responses.get("http://nas:8989/api/v3/series", json=[ser])
+    responses.get("http://nas:7878/api/v3/movie", json=[])
+    responses.get("http://nas:7879/api/v3/movie", json=[])
+
+
+@responses.activate
+def test_v2_show_and_season(client):
+    _show_mocks()
+    responses.get("http://nas:32400/hubs/search", json={"MediaContainer": {"Hub": [{"Metadata": [
+        {"type": "show", "ratingKey": "50", "leafCount": 5, "viewedLeafCount": 2, "Guid": [{"id": "tmdb://95396"}]}]}]}})
+    d = client.get("/api/svc/hub/hub/item/tv-95396", headers=V2).get_json()
+    assert d["meta"] == ["2022–", "MA15+", "2 seasons", "Drama"]
+    assert [c["title"] for c in d["seasonCards"]] == ["Season 1", "Season 2", "Specials"]
+    s1, s2 = d["seasonCards"][0], d["seasonCards"][1]
+    assert s1["id"] == "tv-95396:s1" and s1["badge"] == "2/2" and s1["badgeTone"] == "ok" and s2["badge"] == "1/3"
+    assert any(c["text"].startswith("Next: S02E03") for c in d["status"])
+    ids = [a["id"] for a in d["actions"]]
+    assert ids[0] == "play" and "lib_search" in ids and ids.count("menu") == 2
+
+    now_ = datetime.now(timezone.utc)
+    responses.get("http://nas:5055/api/v1/tv/95396/season/2", json={"name": "Season 2", "overview": "Back.", "episodes": [
+        {"episodeNumber": 1, "name": "Hello, Ms. Cobel", "overview": "Mark returns.", "stillPath": "/e1.jpg",
+         "airDate": "2025-01-17", "voteAverage": 8.4, "runtime": 50},
+        {"episodeNumber": 2, "name": "Goodbye", "airDate": "2025-01-24"},
+        {"episodeNumber": 3, "name": "Future", "airDate": "2099-01-01"}]})
+    responses.get("http://nas:8989/api/v3/episode", json=[
+        {"id": 101, "seasonNumber": 2, "episodeNumber": 1, "hasFile": True, "monitored": True, "episodeFileId": 9001,
+         "airDateUtc": iso(now_ - timedelta(days=300)),
+         "episodeFile": {"size": 2e9, "quality": {"quality": {"name": "WEBDL-2160p"}}}},
+        {"id": 102, "seasonNumber": 2, "episodeNumber": 2, "hasFile": False, "monitored": True,
+         "airDateUtc": iso(now_ - timedelta(days=290))},
+        {"id": 103, "seasonNumber": 2, "episodeNumber": 3, "hasFile": False, "monitored": True,
+         "airDateUtc": iso(now_ + timedelta(days=30))}])
+    responses.get("http://nas:8989/api/v3/queue", json={"records": [{"episodeId": 102}]})
+    responses.get("http://nas:32400/library/metadata/50/allLeaves", json={"MediaContainer": {"Metadata": [
+        {"ratingKey": "60", "parentIndex": 2, "index": 1, "viewCount": 1, "duration": 3000000},
+        {"ratingKey": "59", "parentIndex": 1, "index": 1, "viewCount": 1}]}})
+    p = client.get("/api/svc/hub/hub/season/tv-95396/2", headers=V2)
+    assert p.status_code == 200, p.data
+    s = p.get_json()
+    assert s["season"]["label"] == "Season 2" and "1 downloaded" in s["season"]["meta"]
+    assert [x["number"] for x in s["seasons"]] == [1, 2, 0]
+    e1, e2, e3 = s["episodes"]
+    assert e1["status"] == "downloaded" and "WEBDL-2160p" in e1["statusLabel"] and e1["watched"] is True
+    assert e1["still"] == "https://image.tmdb.org/t/p/w780/e1.jpg" and e1["rating"] == "8.4"
+    a1 = {a["id"]: a for a in e1["actions"]}
+    assert a1["play"]["arg"] == "plex:60" and a1["lib_episode_delete_file"]["arg"] == "sonarr/sonarr/7|9001"
+    assert a1["releases"]["arg"] == "sonarr/sonarr/7|episode:101"
+    assert e2["status"] == "downloading" and e3["status"] == "upcoming" and e3["statusLabel"].startswith("Airs")
+    assert [a["id"] for a in s["actions"]] == ["lib_season_search", "releases", "lib_season_unmonitor"]
+
+    responses.post("http://nas:8989/api/v3/command", json={})
+    r = client.post("/api/svc/hub/hub/item/tv-95396/action", headers=V2,
+                    json={"action": "lib_episode_search", "arg": "sonarr/sonarr/7|102"}).get_json()
+    assert r["refresh"] is True
+    assert json.loads(responses.calls[-1].request.body) == {"name": "EpisodeSearch", "episodeIds": [102]}
+    responses.get("http://nas:8989/api/v3/release", json=[])
+    rel = client.get("/api/svc/hub/hub/item/tv-95396/releases?arg=sonarr/sonarr/7|episode:102", headers=V2)
+    assert rel.status_code == 200 and "episodeId=102" in responses.calls[-1].request.url
+
+
+@responses.activate
+def test_v2_unowned_show_season_offers_request(client):
+    _show_mocks()
+    responses.replace(responses.GET, "http://nas:8989/api/v3/series", json=[])
+    responses.get("http://nas:32400/hubs/search", json={"MediaContainer": {"Hub": []}})
+    responses.get("http://nas:5055/api/v1/tv/95396/season/1", json={"episodes": [
+        {"episodeNumber": 1, "name": "Good News About Hell", "airDate": "2022-02-17"}]})
+    s = client.get("/api/svc/hub/hub/season/tv-95396/1", headers=V2).get_json()
+    assert s["episodes"][0]["status"] == "none" and not s["episodes"][0].get("actions")
+    assert s["actions"][0]["id"] == "request_season" and s["actions"][0]["arg"] == "1"
+    d = client.get("/api/svc/hub/hub/item/tv-95396", headers=V2).get_json()
+    assert d["status"][-1]["text"] in ("Partly available", "Not in your library")
+    assert "badge" not in d["seasonCards"][0]
+
+
+@responses.activate
+def test_v2_libraries_and_dashboard(client):
+    today = datetime.now().astimezone()
+    m_new = dict(MOVIES[1], tmdbId=438631, movieFile={"dateAdded": iso((today - timedelta(days=2)).astimezone(timezone.utc)),
+                                                       "quality": {"quality": {"name": "WEBDL-1080p"}}})
+    responses.get("http://nas:7878/api/v3/movie", json=[m_new, dict(MOVIES[3], tmdbId=55)])
+    responses.get("http://nas:7879/api/v3/movie", json=[dict(m_new, id=99)])
+    show = dict(SERIES[0], tmdbId=95396, tvdbId=1, runtime=30)
+    responses.get("http://nas:8989/api/v3/series", json=[show])
+    responses.get("http://nas:7878/api/v3/queue", json={"records": []})
+    responses.get("http://nas:7879/api/v3/queue", json={"records": []})
+    responses.get("http://nas:8989/api/v3/queue", json={"records": []})
+    responses.get("http://nas:7878/api/v3/calendar", json=[])
+    responses.get("http://nas:7879/api/v3/calendar", json=[])
+    responses.get("http://nas:8989/api/v3/calendar", json=[
+        {"id": 5, "seriesId": 1, "seasonNumber": 2, "episodeNumber": 3, "title": "Out now", "hasFile": True,
+         "monitored": True, "airDateUtc": iso((today - timedelta(hours=1)).astimezone(timezone.utc)), "series": show},
+        {"id": 6, "seriesId": 1, "seasonNumber": 2, "episodeNumber": 4, "title": "Next", "hasFile": False,
+         "monitored": True, "airDateUtc": iso((today + timedelta(days=2)).astimezone(timezone.utc)), "series": show}])
+    responses.get("http://nas:8989/api/v3/wanted/missing", json={"records": []})
+    responses.get("http://nas:8989/api/v3/history", json={"records": []})
+    responses.get("http://nas:7878/api/v3/diskspace", json=[{"path": "/data", "freeSpace": 1e12, "totalSpace": 2e13},
+                                                             {"path": "/", "freeSpace": 5e9, "totalSpace": 6e10}])
+    responses.get("http://nas:7878/api/v3/rootfolder", json=[{"path": "/data/media/movies"}])
+    responses.get("http://nas:7878/api/v3/health", json=[{"type": "warning", "message": "Indexer down"}])
+    responses.get("http://nas:7879/api/v3/health", json=[])
+    responses.get("http://nas:8989/api/v3/health", json=[{"type": "notice", "message": "fine"}])
+    responses.get("http://nas:5055/api/v1/discover/trending", json={"totalPages": 1, "results": [
+        {"id": 7, "mediaType": "movie", "title": "Big", "posterPath": "/b.jpg"}]})
+
+    cfg = client.get("/api/config", headers=V2).get_json()
+    assert [l["inst"] for l in cfg["libraries"]] == ["movies", "tv"] and cfg["dashboard"] is True
+    assert [s["inst"] for s in cfg["services"]][:1] == ["hub"]  # v1's menu is unchanged
+
+    lib = client.get("/api/svc/lib/movies/home", headers=V2)
+    assert lib.status_code == 200, lib.data
+    rows = {r["title"]: r for r in lib.get_json()["rows"]}
+    rec = rows["Recently added"]["items"]
+    assert [c["id"] for c in rec].count("movie-438631") == 1  # HD + 4K copies merged
+    allm = client.get("/api/svc/lib/movies/search?q=", headers=V2).get_json()["items"]
+    assert {c["id"] for c in allm} >= {"movie-438631", "movie-55"}
+
+    d = client.get("/api/dash", headers=V2)
+    assert d.status_code == 200, d.data
+    d = d.get_json()
+    labels = {s["label"]: s for s in d["stats"]}
+    assert labels["Movies"]["value"] == "2" and labels["TV shows"]["value"] == "1"
+    assert labels["Free space"]["value"] == "931.3 GB" and "18.2 TB" in labels["Free space"]["sub"]
+    assert d["today"][0]["openId"] == "tv-95396:s2e3"
+    assert d["week"][0]["dow"] == "Today" and d["week"][0]["count"] == 1 and len(d["week"]) == 7
+    titles = [r["title"] for r in d["rows"]]
+    assert titles[0] == "Ready to watch" and "Coming up this week" in titles and "New movies" in titles
+    assert d["rows"][0]["items"][0]["id"] == "tv-95396:s2e3" and d["rows"][0]["items"][0]["badge"] == "New"
+    assert d["alerts"] == [{"text": "Movies: Indexer down", "tone": "warn"}]
+
+
+@responses.activate
+def test_trailer_resolve_and_proxy(client, monkeypatch):
+    class P:
+        returncode = 0
+        stderr = ""
+        stdout = json.dumps({"title": "Trailer", "duration": 120, "requested_formats": [
+            {"url": "https://rr1.googlevideo.com/v", "height": 1080, "http_headers": {"User-Agent": "UA"}},
+            {"url": "https://rr1.googlevideo.com/a", "http_headers": {"User-Agent": "UA"}}]})
+    calls = []
+    monkeypatch.setattr(gw.subprocess, "run", lambda cmd, **kw: calls.append(cmd) or P())
+    monkeypatch.setattr(gw, "trailers_available", lambda: True)
+    gw._YT.clear()
+    t = client.get("/api/trailer/abcDEF12345", headers=V2).get_json()
+    assert t == {"title": "Trailer", "duration": 120, "height": 1080, "video": "/yt/abcDEF12345/0",
+                 "audio": "/yt/abcDEF12345/1"}
+    assert "yt_dlp" in calls[0] and calls[0][-1].endswith("v=abcDEF12345")
+    responses.get("https://rr1.googlevideo.com/v", body=b"0123456789", status=206,
+                  headers={"Content-Range": "bytes 0-9/100", "Content-Type": "video/mp4"})
+    r = client.get("/yt/abcDEF12345/0?t=tok", headers={"Range": "bytes=0-9"})
+    assert r.status_code == 206 and r.data == b"0123456789" and r.headers["Content-Range"] == "bytes 0-9/100"
+    assert responses.calls[-1].request.headers["Range"] == "bytes=0-9"
+    assert responses.calls[-1].request.headers["User-Agent"] == "UA"
+    assert client.get("/api/trailer/bad!id", headers=V2).status_code in (400, 404)
+    assert len(calls) == 1  # cached

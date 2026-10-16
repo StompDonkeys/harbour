@@ -17,6 +17,8 @@ import os
 import posixpath
 import re
 import random
+import subprocess
+import sys
 import threading
 import time
 from collections import Counter
@@ -43,7 +45,8 @@ FILES = None
 HUB = None
 PLEX = None
 CLIENTS = {}   # download clients by id
-POOL = ThreadPoolExecutor(max_workers=16)
+LIBS = {}      # Harbour v2's merged Movies / TV libraries
+POOL = ThreadPoolExecutor(max_workers=64)  # roomy: pages fan out, and fan-outs nest
 DEFAULT_REPO = "StompDonkeys/harbour"
 
 
@@ -121,11 +124,12 @@ def row(title, items, style="poster", key=None, more=False):
     return r
 
 
-def action(id_, label, style=None, confirm=None, arg=None, opens=None, choose=None):
+def action(id_, label, style=None, confirm=None, arg=None, opens=None, choose=None, items=None):
     """A button on a detail page. `opens` makes the app open a screen (e.g. "releases") instead
-    of calling the gateway; `choose` makes it ask the user to pick one option first."""
+    of calling the gateway; `choose` makes it ask the user to pick one option first; `items`
+    makes it a little menu of further actions (Harbour v2)."""
     return clean({"id": id_, "label": label, "style": style, "confirm": confirm, "arg": arg,
-                  "opens": opens, "choose": choose})
+                  "opens": opens, "choose": choose, "items": items or None})
 
 
 def facts(*pairs):
@@ -505,6 +509,9 @@ class Radarr(Arr):
         elif act in ("monitor", "unmonitor"):
             self.put("/movie/editor", {"movieIds": [mid], "monitored": act == "monitor"})
             msg = "Monitoring on" if act == "monitor" else "Monitoring off"
+        elif act == "delete_file":
+            self.delete(f"/moviefile/{int(arg)}")
+            msg = "File deleted"
         elif act in ("delete", "delete_files"):
             self.delete(f"/movie/{mid}", deleteFiles=str(act == "delete_files").lower(),
                         addImportExclusion="false")
@@ -1283,6 +1290,39 @@ def tmdb_img(path, size):
     return f"{TMDB_IMG}{size}{path}" if path else None
 
 
+def is_4k(s):
+    return "4k" in (getattr(s, "icon", "") or "").lower() or "4k" in (s.name or "").lower() \
+        or "4k" in (s.inst or "").lower() or "uhd" in (s.inst or "").lower()
+
+
+_TMDB_CACHE = {}
+
+
+def tmdb_direct(path, **params):
+    """Straight to TMDB, only when a key is configured ("tmdb": {"api_key": ...}). Extras only:
+    title logos and season trailers. Returns None without a key or on any error."""
+    key = (CFG.get("tmdb") or {}).get("api_key")
+    if not key:
+        return None
+    ck = path + repr(sorted(params.items()))
+    hit = _TMDB_CACHE.get(ck)
+    if hit and time.time() - hit[0] < 3600:
+        return hit[1]
+    headers = {}
+    if len(key) > 40:  # a v4 "read access token"
+        headers["Authorization"] = f"Bearer {key}"
+    else:
+        params["api_key"] = key
+    try:
+        r = requests.get(f"https://api.themoviedb.org/3{path}", params=params, headers=headers, timeout=15)
+        val = r.json() if r.status_code < 400 else None
+    except (requests.RequestException, ValueError) as e:
+        log.warning("tmdb %s failed: %s", path, e)
+        val = None
+    _TMDB_CACHE[ck] = (time.time(), val)
+    return val
+
+
 class Hub:
     """
     The Home tab and the rich title / person pages. Metadata (cast, filmographies,
@@ -1299,6 +1339,8 @@ class Hub:
         self.plex = plex
         self._homes = {}
         self._lock = threading.Lock()
+        self._dash = None
+        self._dash_lock = threading.Lock()
 
     def info(self):
         return {"kind": self.kind, "inst": self.inst, "name": self.name, "icon": self.icon}
@@ -1496,7 +1538,7 @@ class Hub:
         title = d.get("title") or d.get("name") or ""
         owned = self.owned()
 
-        # headline facts: tagline, director/creator, ratings
+        # headline facts: director/creator, ratings
         extra = []
         crew = (d.get("credits") or {}).get("crew") or []
         if mt == "movie":
@@ -1504,18 +1546,15 @@ class Hub:
             extra.append(("Director", ", ".join(directors[:3])))
         else:
             extra.append(("Created by", ", ".join(c.get("name", "") for c in d.get("createdBy") or [])))
-        if mt == "movie":
-            rt = safe(lambda: self.seerr.cached(f"ratings-{tid}", 86400,
-                                                lambda: self.seerr._req("GET", f"/movie/{tid}/ratingscombined")),
-                      "ratings", {}) or {}
-            imdb = (rt.get("imdb") or {}).get("criticsScore")
-            rtc = (rt.get("rt") or {}).get("criticsScore")
-            extra.append(("Ratings", join(f"IMDb {imdb}" if imdb else None, f"Rotten Tomatoes {rtc}%" if rtc else None)))
-        if d.get("tagline"):
-            page["item"]["overview"] = f"“{d['tagline']}”\n\n{page['item'].get('overview') or ''}".strip()
+        ratings = self.ratings(mt, tid, d)
+        if not is_v2():
+            extra.append(("Ratings", join(*(f"{r['label']} {r['value']}" for r in ratings if r["label"] != "TMDB"))))
+            if d.get("tagline"):
+                page["item"]["overview"] = f"“{d['tagline']}”\n\n{page['item'].get('overview') or ''}".strip()
         page["facts"] = facts(*extra) + page["facts"]
 
         # Plex: watched state + play
+        play_acts, plex_state = [], None
         if self.plex:
             user, pin = plex_user_from_request()
             token = safe(lambda: self.plex.token_for(user, pin), "plex token", None)
@@ -1524,48 +1563,609 @@ class Hub:
                 if mt == "movie":
                     if pm.get("viewOffset"):
                         left = max(0, ((pm.get("duration") or 0) - pm["viewOffset"]) // 60000)
-                        state = f"In progress · {left}m left"
+                        plex_state = f"In progress · {left}m left"
                     else:
-                        state = "Watched" if pm.get("viewCount") else "Not watched"
+                        plex_state = "Watched" if pm.get("viewCount") else "Not watched"
                 else:
-                    state = f"{pm.get('viewedLeafCount', 0)} of {pm.get('leafCount', 0)} episodes watched"
-                page["facts"].insert(0, {"label": "Plex", "value": state})
+                    plex_state = f"{pm.get('viewedLeafCount', 0)} of {pm.get('leafCount', 0)} episodes watched"
+                page["facts"].insert(0, {"label": "Plex", "value": plex_state})
                 rk = pm.get("ratingKey")
                 if is_v2():
                     if mt == "movie" and pm.get("viewOffset"):
                         left = max(0, ((pm.get("duration") or 0) - pm["viewOffset"]) // 60000)
-                        page["actions"][0:0] = [
+                        play_acts = [
                             action("play", f"Resume · {left}m left", "primary", opens="play", arg=f"plex:{rk}"),
                             action("play_start", "Play from start", opens="play", arg=f"plex:{rk}|start")]
                     else:
-                        page["actions"].insert(0, action("play", "Play", "primary", opens="play", arg=f"plex:{rk}"))
+                        play_acts = [action("play", "Play" if mt == "movie" else "Play next", "primary",
+                                            opens="play", arg=f"plex:{rk}")]
                 else:
-                    page["actions"].insert(0, action("plex", "▶  Play in Plex", "primary", opens="plex",
-                                                     arg=f"{self.plex.machine_id()}|{rk}"))
+                    play_acts = [action("plex", "▶  Play in Plex", "primary", opens="plex",
+                                        arg=f"{self.plex.machine_id()}|{rk}")]
 
-        # trailer
-        vids = d.get("relatedVideos") or []
-        trailer = next((v for v in vids if v.get("site") == "YouTube" and v.get("type") == "Trailer"), None) \
-            or next((v for v in vids if v.get("site") == "YouTube"), None)
-        if trailer and trailer.get("key"):
-            page["actions"].append(action("trailer", "Trailer", opens="youtube", arg=trailer["key"]))
+        videos = self.videos(d.get("relatedVideos") or [])
 
         # cast + recommendations
         cast = sorted((d.get("credits") or {}).get("cast") or [], key=lambda c: c.get("order", 999))[:24]
         page["people"] = [clean({"id": f"person-{c['id']}", "name": c.get("name") or "?",
                                  "role": c.get("character"), "photo": tmdb_img(c.get("profilePath"), "w185")})
                           for c in cast if c.get("id")]
+        coll = d.get("collection") or {}
+        v2 = is_v2()  # read now: the fetches below run on worker threads, outside this request
         recs = par(
             r=lambda: safe(lambda: self.seerr._req("GET", f"/{mt}/{tid}/recommendations", {"page": 1}).get("results"),
                            "recommendations", []),
             s=lambda: safe(lambda: self.seerr._req("GET", f"/{mt}/{tid}/similar", {"page": 1}).get("results"),
                            "similar", []),
+            c=lambda: safe(lambda: self.seerr.cached(f"coll-{coll['id']}", 3600, lambda: self.seerr._req(
+                "GET", f"/collection/{coll['id']}")).get("parts"), "collection", [])
+            if (v2 and coll.get("id")) else [],
+            logo=lambda: self.logo(mt, tid) if v2 else None,
         )
-        page["rows"] = [r for r in (
+        rows = []
+        if recs["c"]:
+            parts = sorted(recs["c"], key=lambda p: p.get("releaseDate") or "9999")
+            rows.append(row(coll.get("name") or "Collection", [self.mark(c, owned) for c in self.seerr.cards(parts, "movie")]))
+        rows += [
             row("More like this", [self.mark(c, owned) for c in self.seerr.cards(recs["r"], mt)]),
             row("Similar", [self.mark(c, owned) for c in self.seerr.cards(recs["s"], mt)]),
+        ]
+        page["rows"] = [r for r in rows if r["items"]]
+
+        if not is_v2():
+            page["actions"][0:0] = play_acts
+            trailer = next((v for v in videos if v["type"] == "Trailer"), videos[0] if videos else None)
+            if trailer:
+                page["actions"].append(action("trailer", "Trailer", opens="youtube", arg=trailer["key"]))
+            return page
+
+        # ---- Harbour v2: one page that does everything for this title
+        matches = self.seerr.library_matches(mt, d)
+        page.update(
+            tagline=d.get("tagline") or None,
+            meta=self.meta_line(mt, d),
+            ratings=ratings,
+            status=self.status_chips(mt, d, matches, plex_state),
+            actions=self.v2_actions(mt, tid, d, matches, play_acts, videos),
+            videos=videos,
+            providers=self.providers(d),
+            seasonCards=self.season_cards(tid, d, matches) if mt == "tv" else [],
+            seasons=[],
+            logo=recs["logo"],
+        )
+        page["item"]["backdrop"] = tmdb_img(d.get("backdropPath"), "w1280") or page["item"].get("backdrop")
+        return clean(page)
+
+    # -- pieces of the v2 title page
+    def ratings(self, mt, tid, d):
+        out = []
+        if mt == "movie":
+            rt = safe(lambda: self.seerr.cached(f"ratings-{tid}", 86400,
+                                                lambda: self.seerr._req("GET", f"/movie/{tid}/ratingscombined")),
+                      "ratings", {}) or {}
+            imdb = (rt.get("imdb") or {}).get("criticsScore")
+            if imdb:
+                out.append({"label": "IMDb", "value": f"{imdb}"})
+            r = rt.get("rt") or {}
+        else:
+            r = safe(lambda: self.seerr.cached(f"ratings-tv-{tid}", 86400,
+                                               lambda: self.seerr._req("GET", f"/tv/{tid}/ratings")),
+                     "ratings", {}) or {}
+        if r.get("criticsScore"):
+            out.append({"label": "Rotten Tomatoes", "value": f"{r['criticsScore']}%"})
+        if r.get("audienceScore"):
+            out.append({"label": "Audience", "value": f"{r['audienceScore']}%"})
+        if d.get("voteAverage"):
+            out.append({"label": "TMDB", "value": f"{d['voteAverage']:.1f}"})
+        return out
+
+    @staticmethod
+    def certification(mt, d):
+        prefs = (CFG.get("region") or "AU", "US")
+        if mt == "movie":
+            res = (d.get("releases") or {}).get("results") or []
+            for p in prefs:
+                for r in res:
+                    if r.get("iso_3166_1") == p:
+                        c = next((x.get("certification") for x in r.get("release_dates") or [] if x.get("certification")), None)
+                        if c:
+                            return c
+        else:
+            res = (d.get("contentRatings") or {}).get("results") or []
+            for p in prefs:
+                c = next((r.get("rating") for r in res if r.get("iso_3166_1") == p and r.get("rating")), None)
+                if c:
+                    return c
+        return None
+
+    def meta_line(self, mt, d):
+        genres = " · ".join(g.get("name", "") for g in (d.get("genres") or [])[:3])
+        if mt == "movie":
+            return [x for x in (year_of(d.get("releaseDate")), self.certification(mt, d),
+                                fmt_runtime(d.get("runtime")), genres) if x]
+        first, last = year_of(d.get("firstAirDate")), year_of(d.get("lastAirDate"))
+        ended = (d.get("status") or "") in ("Ended", "Canceled")
+        years = f"{first}–{last}" if ended and last and last != first else (first if ended else f"{first}–") if first else None
+        n = d.get("numberOfSeasons")
+        return [x for x in (years, self.certification(mt, d), f"{n} season{'s' if n != 1 else ''}" if n else None,
+                            genres) if x]
+
+    @staticmethod
+    def videos(vids):
+        order = {"Trailer": 0, "Teaser": 1, "Clip": 2, "Featurette": 3, "Behind the Scenes": 4}
+        yt = [v for v in vids if v.get("site") == "YouTube" and v.get("key")]
+        yt.sort(key=lambda v: order.get(v.get("type"), 9))
+        return [clean({"key": v["key"], "name": v.get("name") or v.get("type") or "Video", "type": v.get("type"),
+                       "thumb": f"https://i.ytimg.com/vi/{v['key']}/mqdefault.jpg"}) for v in yt[:20]]
+
+    def providers(self, d):
+        region = CFG.get("region") or "AU"
+        for wp in d.get("watchProviders") or []:
+            if wp.get("iso_3166_1") == region:
+                return [clean({"name": p.get("name"), "logo": tmdb_img(p.get("logoPath"), "w92")})
+                        for p in sorted(wp.get("flatrate") or [], key=lambda p: p.get("displayPriority", 99))][:6]
+        return []
+
+    def logo(self, mt, tid):
+        """A clear title logo (needs the optional TMDB key)."""
+        res = tmdb_direct(f"/{mt}/{tid}/images", include_image_language="en,null")
+        logos = [l for l in (res or {}).get("logos") or [] if (l.get("file_path") or "").endswith(".png")]
+        return tmdb_img(logos[0]["file_path"], "w500") if logos else None
+
+    def status_chips(self, mt, d, matches, plex_state):
+        chips = []
+        if mt == "movie":
+            for s, m in matches:
+                if m.get("hasFile"):
+                    chips.append({"text": join(s.name, Radarr.quality(m), fmt_size(m.get("sizeOnDisk"))), "tone": "ok"})
+                elif not m.get("monitored"):
+                    chips.append({"text": f"{s.name} · unmonitored", "tone": "muted"})
+                elif m.get("isAvailable"):
+                    chips.append({"text": f"{s.name} · missing", "tone": "warn"})
+                else:
+                    chips.append({"text": f"{s.name} · waiting for release", "tone": "info"})
+        else:
+            for s, m in matches:
+                st = m.get("statistics") or {}
+                have, total = st.get("episodeFileCount", 0), st.get("episodeCount", 0)
+                chips.append({"text": join(s.name, f"{have} of {total} episodes",
+                                           fmt_size(st.get("sizeOnDisk")) if st.get("sizeOnDisk") else None),
+                              "tone": "ok" if total and have >= total else "warn"})
+            status = d.get("status")
+            if status:
+                chips.append({"text": {"Returning Series": "Returning series"}.get(status, status), "tone": "muted"})
+            nx = d.get("nextEpisodeToAir") or {}
+            if nx.get("airDate"):
+                chips.append({"text": f"Next: S{nx.get('seasonNumber', 0):02d}E{nx.get('episodeNumber', 0):02d}"
+                                      f" · {fmt_date(nx['airDate'])}", "tone": "info"})
+        if not matches:
+            st = (d.get("mediaInfo") or {}).get("status")
+            if st in REQUESTED:
+                chips.append({"text": SEERR_STATUS[st][0], "tone": SEERR_STATUS[st][1]})
+            else:
+                chips.append({"text": "Not in your library", "tone": "muted"})
+        if plex_state:
+            chips.append({"text": f"Plex · {plex_state}", "tone": "muted"})
+        return chips
+
+    def v2_actions(self, mt, tid, d, matches, play_acts, videos):
+        title = d.get("title") or d.get("name") or "this"
+        acts = list(play_acts)
+        if videos:
+            t = next((v for v in videos if v.get("type") == "Trailer"), videos[0])
+            acts.append(action("trailer", "Trailer", opens="trailer", arg=t["key"]))
+        mi = d.get("mediaInfo") or {}
+        st, st4k = mi.get("status"), mi.get("status4k")
+        have_4k = any(is_4k(s) for s, _ in matches)
+        if not matches and st not in REQUESTED:
+            acts.append(action("request", "Add to library" if mt == "movie" else "Add series", "primary",
+                               choose=self.seerr.folder_choice(mt, False)))
+        if self.seerr.has_4k(mt) and not have_4k and st4k not in REQUESTED:
+            acts.append(action("request4k", "Add in 4K", choose=self.seerr.folder_choice(mt, True)))
+        for s, m in matches:
+            tgt = f"{s.kind}/{s.inst}/{m['id']}"
+            if mt == "movie":
+                if not m.get("hasFile"):
+                    acts.append(action("lib_search", f"Search · {s.name}" if len(matches) > 1 else "Search",
+                                       "primary", arg=tgt))
+                items = [
+                    action("lib_search", "Auto search", "primary", arg=tgt),
+                    action("releases", "Manual search", opens="releases", arg=f"{tgt}|movie"),
+                    action("lib_unmonitor", "Unmonitor", arg=tgt) if m.get("monitored")
+                    else action("lib_monitor", "Monitor", arg=tgt),
+                ]
+                mf = m.get("movieFile") or {}
+                if m.get("hasFile") and mf.get("id"):
+                    items.append(action("lib_delete_file", "Delete file", "danger", arg=f"{tgt}|{mf['id']}",
+                                        confirm=f"Delete the {s.name} file for “{title}”? Radarr keeps the movie, "
+                                                f"so it can download it again."))
+                items += [
+                    action("lib_delete", f"Remove from {s.name}", arg=tgt,
+                           confirm=f"Remove “{title}” from {s.name}? Files stay on the NAS."),
+                    action("lib_delete_files", "Remove + delete files", "danger", arg=tgt,
+                           confirm=f"Remove “{title}” from {s.name} AND delete its files? This can't be undone."),
+                ]
+            else:
+                stt = m.get("statistics") or {}
+                if stt.get("episodeFileCount", 0) < stt.get("episodeCount", 0):
+                    acts.append(action("lib_search", "Search missing", "primary", arg=tgt))
+                items = [
+                    action("lib_search", "Search all missing", "primary", arg=tgt),
+                    action("lib_unmonitor", "Unmonitor series", arg=tgt) if m.get("monitored")
+                    else action("lib_monitor", "Monitor series", arg=tgt),
+                    action("lib_delete", f"Remove from {s.name}", arg=tgt,
+                           confirm=f"Remove “{title}” from {s.name}? Files stay on the NAS."),
+                    action("lib_delete_files", "Remove + delete files", "danger", arg=tgt,
+                           confirm=f"Remove “{title}” from {s.name} AND delete every episode file? "
+                                   f"This can't be undone."),
+                ]
+            acts.append(action("menu", s.name, opens="menu", items=items))
+        if mi.get("id") and (st or st4k or mi.get("requests")):
+            acts.append(action("menu", "More", opens="menu", items=[action(
+                "clear", f"Clear from {self.seerr.name}", "danger",
+                confirm=f"Clear “{title}” from {self.seerr.name}? Its requests and status are wiped so it can be "
+                        f"requested again. Files, Radarr and Sonarr aren't touched.")]))
+        return acts
+
+    def season_cards(self, tid, d, matches):
+        stats = {}
+        if matches:
+            for x in matches[0][1].get("seasons") or []:
+                stats[x.get("seasonNumber")] = x
+        out = []
+        seasons = sorted(d.get("seasons") or [], key=lambda x: (x.get("seasonNumber", 0) == 0, x.get("seasonNumber", 0)))
+        for s in seasons:
+            n = s.get("seasonNumber", 0)
+            if not s.get("episodeCount"):
+                continue
+            sst = (stats.get(n) or {}).get("statistics") or {}
+            have, total = sst.get("episodeFileCount"), sst.get("totalEpisodeCount") or sst.get("episodeCount")
+            badge, tone = None, None
+            if matches and total:
+                badge = f"{have or 0}/{total}"
+                tone = "ok" if (have or 0) >= total else ("warn" if (stats.get(n) or {}).get("monitored") else "muted")
+            out.append(clean({
+                "key": f"tv-{tid}:s{n}", "id": f"tv-{tid}:s{n}",
+                "title": "Specials" if n == 0 else (s.get("name") or f"Season {n}"),
+                "subtitle": join(f"{s['episodeCount']} episodes", year_of(s.get("airDate"))),
+                "poster": tmdb_img(s.get("posterPath"), "w342") or tmdb_img(d.get("posterPath"), "w342"),
+                "overview": s.get("overview"),
+                "badge": badge, "badgeTone": tone,
+            }))
+        return out
+
+    # -- a season, episode by episode (TMDB for the story, Sonarr for files, Plex for watched)
+    def season(self, item_id, n):
+        mt, _, tid = item_id.partition("-")
+        if mt != "tv" or not tid.isdigit():
+            raise ApiError("Bad show id")
+        tid, n = int(tid), int(n)
+        d = self._tmdb("tv", tid)
+        title = d.get("name") or ""
+        matches = self.seerr.library_matches("tv", d)
+        so, ser = matches[0] if matches else (None, None)
+        who = plex_user_from_request()  # read now: the fetches below run on worker threads
+        got = par(
+            tm=lambda: safe(lambda: self.seerr.cached(f"tmdb-season-{tid}-{n}", 600,
+                                                      lambda: self.seerr._req("GET", f"/tv/{tid}/season/{n}")),
+                            "tmdb season", {}) or {},
+            eps=lambda: safe(lambda: so.get("/episode", seriesId=ser["id"], seasonNumber=n, includeEpisodeFile="true"),
+                             "sonarr episodes", []) if so else [],
+            queue=lambda: safe(lambda: {r.get("episodeId") for r in so.get("/queue", page=1, pageSize=250)
+                                        .get("records", [])}, "sonarr queue", set()) if so else set(),
+            plex=lambda: self.plex_season(tid, title, n, who),
+            vids=lambda: tmdb_direct(f"/tv/{tid}/season/{n}/videos") or {},
+        )
+        tm, se_by = got["tm"], {e.get("episodeNumber"): e for e in got["eps"]}
+        te_by = {e.get("episodeNumber"): e for e in tm.get("episodes") or []}
+        now = datetime.now(timezone.utc)
+        tgt = f"{so.kind}/{so.inst}/{ser['id']}" if so else None
+        episodes = []
+        for num in sorted(set(te_by) | set(se_by)):
+            te, se, pl = te_by.get(num) or {}, se_by.get(num), got["plex"].get(num)
+            air = parse_dt(se.get("airDateUtc")) if se and se.get("airDateUtc") else parse_dt(te.get("airDate"))
+            air_utc = air.astimezone(timezone.utc) if air and air.tzinfo else (
+                air.replace(tzinfo=timezone.utc) if air else None)
+            ef = (se or {}).get("episodeFile") or {}
+            quality = ((ef.get("quality") or {}).get("quality") or {}).get("name")
+            if se and se.get("hasFile"):
+                status, label = "downloaded", join("Downloaded", quality, fmt_size(ef.get("size")) if ef.get("size") else None)
+            elif se and se.get("id") in got["queue"]:
+                status, label = "downloading", "Downloading"
+            elif air_utc and air_utc > now:
+                status, label = "upcoming", f"Airs {fmt_date(se.get('airDateUtc') if se else te.get('airDate'), True)}"
+            elif se and not se.get("monitored"):
+                status, label = "unmonitored", "Unmonitored"
+            elif se:
+                status, label = "missing", "Missing"
+            else:
+                status, label = "none", "Not in your library"
+            acts = []
+            if pl:
+                off, dur = pl.get("viewOffset") or 0, pl.get("duration") or 0
+                acts.append(action("play", f"Resume · {max(0, (dur - off) // 60000)}m left" if off else "Play",
+                                   "primary", opens="play", arg=f"plex:{pl['ratingKey']}"))
+                if off:
+                    acts.append(action("play_start", "Play from start", opens="play", arg=f"plex:{pl['ratingKey']}|start"))
+            if se:
+                eid = se["id"]
+                acts += [
+                    action("lib_episode_search", "Auto search", None if se.get("hasFile") else "primary",
+                           arg=f"{tgt}|{eid}"),
+                    action("releases", "Manual search", opens="releases", arg=f"{tgt}|episode:{eid}"),
+                    action("lib_episode_unmonitor", "Unmonitor", arg=f"{tgt}|{eid}") if se.get("monitored")
+                    else action("lib_episode_monitor", "Monitor", arg=f"{tgt}|{eid}"),
+                ]
+                if se.get("hasFile") and se.get("episodeFileId"):
+                    acts.append(action("lib_episode_delete_file", "Delete file", "danger",
+                                       arg=f"{tgt}|{se['episodeFileId']}",
+                                       confirm=f"Delete the file for S{n:02d}E{num:02d} of {title}? "
+                                               f"This can't be undone."))
+            still = tmdb_img(te.get("stillPath"), "w780")
+            if not still and se:
+                still = so.image((se or {}).get("images"), "screenshot", "w780")
+            episodes.append(clean({
+                "key": f"e{num}", "number": num, "label": f"E{num:02d}",
+                "title": te.get("name") or (se or {}).get("title") or "TBA",
+                "overview": te.get("overview") or (se or {}).get("overview"),
+                "still": still,
+                "airDate": fmt_date(se.get("airDateUtc") if se and se.get("airDateUtc") else te.get("airDate"), True),
+                "runtime": fmt_runtime(te.get("runtime") or (ser or {}).get("runtime")),
+                "rating": f"{te['voteAverage']:.1f}" if te.get("voteAverage") else None,
+                "status": status, "statusLabel": label,
+                "watched": bool(pl and pl.get("viewCount")),
+                "progress": round(pl["viewOffset"] / pl["duration"], 3) if pl and pl.get("viewOffset") and pl.get("duration") else None,
+                "actions": acts,
+            }))
+        # season-level actions
+        sacts = []
+        sstat = next((x for x in (ser or {}).get("seasons") or [] if x.get("seasonNumber") == n), None)
+        if so:
+            sacts += [
+                action("lib_season_search", "Search season", "primary", arg=f"{tgt}|{n}"),
+                action("releases", "Manual search", opens="releases", arg=f"{tgt}|season:{n}"),
+                action("lib_season_unmonitor", "Unmonitor season", arg=f"{tgt}|{n}") if (sstat or {}).get("monitored")
+                else action("lib_season_monitor", "Monitor season", arg=f"{tgt}|{n}"),
+            ]
+        else:
+            mi_seasons = {x.get("seasonNumber"): x.get("status") for x in (d.get("mediaInfo") or {}).get("seasons") or []}
+            if mi_seasons.get(n) not in REQUESTED:
+                sacts.append(action("request_season", f"Add season {n}", "primary", arg=str(n),
+                                    choose=self.seerr.folder_choice("tv", False)))
+        have = sum(1 for e in got["eps"] if e.get("hasFile"))
+        tm_season = next((s for s in d.get("seasons") or [] if s.get("seasonNumber") == n), {})
+        return {
+            "show": clean({"id": f"tv-{tid}", "title": title,
+                           "backdrop": tmdb_img(d.get("backdropPath"), "w1280"),
+                           "poster": tmdb_img(d.get("posterPath"), "w342")}),
+            "season": clean({
+                "number": n, "label": "Specials" if n == 0 else (tm.get("name") or tm_season.get("name") or f"Season {n}"),
+                "overview": tm.get("overview") or tm_season.get("overview"),
+                "poster": tmdb_img(tm.get("posterPath") or tm_season.get("posterPath"), "w342"),
+                "meta": join(f"{len(episodes)} episodes", year_of(tm.get("airDate") or tm_season.get("airDate")),
+                             f"{have} downloaded" if so else None),
+            }),
+            "seasons": [{"number": s.get("seasonNumber", 0),
+                         "label": "Specials" if s.get("seasonNumber", 0) == 0 else f"Season {s.get('seasonNumber')}"}
+                        for s in sorted(d.get("seasons") or [], key=lambda x: (x.get("seasonNumber", 0) == 0,
+                                                                               x.get("seasonNumber", 0)))
+                        if s.get("episodeCount")],
+            "actions": sacts,
+            "episodes": episodes,
+            "videos": self.videos(got["vids"].get("results") or []),
+        }
+
+    def plex_season(self, tid, title, n, who):
+        if not self.plex:
+            return {}
+        user, pin = who
+        token = safe(lambda: self.plex.token_for(user, pin), "plex token", None)
+        if not token:
+            return {}
+        pm = safe(lambda: self.plex.find("tv", tid, title, token), "plex search", None)
+        if not pm:
+            return {}
+        leaves = safe(lambda: self.plex.leaves(pm["ratingKey"], token), "plex leaves", [])
+        return {x.get("index"): x for x in leaves if x.get("parentIndex") == n}
+
+    # -- v2 Home: a dashboard
+    def drop_dash(self):
+        self._dash = None
+
+    def dash(self):
+        hit = self._dash
+        if hit and time.time() - hit[0] < 60:
+            return hit[1]
+        with self._dash_lock:
+            hit = self._dash
+            if hit and time.time() - hit[0] < 60:
+                return hit[1]
+            val = self._build_dash()
+            self._dash = (time.time(), val)
+            return val
+
+    def disk(self):
+        """(free, total) bytes across the volumes your libraries live on."""
+        for a in self.radarrs() + self.sonarrs():
+            got = safe(lambda: par(d=lambda: a.get("/diskspace"), r=lambda: a.get("/rootfolder")),
+                       f"{a.name} disk", None)
+            if not got:
+                continue
+            roots = [r.get("path") or "" for r in got["r"]]
+            def owner(rt):  # the most specific volume holding this root folder
+                cands = [v for v in got["d"] if v.get("totalSpace") and
+                         (rt == v.get("path") or rt.startswith((v.get("path") or "").rstrip("/") + "/"))]
+                return max(cands, key=lambda v: len(v.get("path") or ""), default=None)
+            vols = [v for v in (owner(rt) for rt in roots) if v]
+            if not vols:
+                vols = sorted(got["d"], key=lambda v: -(v.get("totalSpace") or 0))[:1]
+            seen, free, total = set(), 0, 0
+            for v in vols:
+                k = (v.get("freeSpace"), v.get("totalSpace"))
+                if k in seen:
+                    continue
+                seen.add(k)
+                free += v.get("freeSpace") or 0
+                total += v.get("totalSpace") or 0
+            if total:
+                return free, total
+        return None
+
+    def health(self):
+        out = []
+        for a in self.radarrs() + self.sonarrs():
+            for h in safe(lambda: a.get("/health"), f"{a.name} health", []) or []:
+                if h.get("type") in ("warning", "error"):
+                    out.append({"text": f"{a.name}: {h.get('message')}", "tone": "danger" if h["type"] == "error" else "warn"})
+        return out[:5]
+
+    def _build_dash(self):
+        now = datetime.now().astimezone()
+        today = now.date()
+        d = par(
+            cal=lambda: safe(lambda: calendar((today - timedelta(days=7)).isoformat(),
+                                              (today + timedelta(days=56)).isoformat()),
+                             "calendar", {"entries": []}),
+            radarr=lambda: [(r, safe(r.movies, r.name, [])) for r in self.radarrs()],
+            sonarr=lambda: [(s, safe(s.series, s.name, [])) for s in self.sonarrs()],
+            disk=lambda: safe(self.disk, "disk", None),
+            health=lambda: safe(self.health, "health", []),
+            dl=lambda: safe(downloads_snapshot, "downloads", None) if CLIENTS else None,
+            trending=lambda: safe(lambda: self.seerr.row_page("trending", 1)["items"], "trending", []),
+        )
+        ents = d["cal"]["entries"]
+        iso_today = today.isoformat()
+
+        # stats
+        movies, on_disk, msize, uhd = {}, set(), 0, 0
+        for r, ms in d["radarr"]:
+            for m in ms:
+                k = m.get("tmdbId") or f"{r.inst}:{m.get('id')}"
+                movies[k] = m
+                msize += m.get("sizeOnDisk") or 0
+                if m.get("hasFile"):
+                    on_disk.add(k)
+                    uhd += 1 if is_4k(r) else 0
+        shows, airing, eps, eptotal, tsize = {}, 0, 0, 0, 0
+        for so, ss in d["sonarr"]:
+            for s in ss:
+                k = s.get("tvdbId") or f"{so.inst}:{s.get('id')}"
+                if k not in shows and s.get("status") in ("continuing", "upcoming"):
+                    airing += 1
+                shows[k] = s
+                st = s.get("statistics") or {}
+                eps += st.get("episodeFileCount") or 0
+                eptotal += st.get("episodeCount") or 0
+                tsize += st.get("sizeOnDisk") or 0
+        stats = []
+        if d["radarr"]:
+            stats.append({"label": "Movies", "value": f"{len(movies):,}",
+                          "sub": join(f"{len(on_disk):,} on disk", f"{uhd:,} in 4K" if uhd else None)})
+        if d["sonarr"]:
+            stats.append({"label": "TV shows", "value": f"{len(shows):,}", "sub": f"{airing:,} still airing"})
+            stats.append({"label": "Episodes", "value": f"{eps:,}", "sub": f"of {eptotal:,} aired"})
+        if msize or tsize:
+            stats.append({"label": "Library size", "value": fmt_size(msize + tsize),
+                          "sub": join(f"Movies {fmt_size(msize)}" if msize else None,
+                                      f"TV {fmt_size(tsize)}" if tsize else None)})
+        if d["disk"]:
+            free, total = d["disk"]
+            stats.append({"label": "Free space", "value": fmt_size(free), "sub": f"of {fmt_size(total)}",
+                          "tone": "warn" if total and free / total < 0.1 else None})
+        if d["dl"] is not None:
+            active = [i for i in d["dl"]["items"] if (i.get("progress") or 0) < 1 and not i.get("paused")]
+            speed = sum(c.get("speed") or 0 for c in d["dl"]["clients"])
+            stats.append({"label": "Downloading", "value": f"{len(active)}",
+                          "sub": f"{fmt_size(speed)}/s" if speed else "idle"})
+        stats = [clean(s) for s in stats]
+
+        def open_id(e):
+            if e["kind"] == "tv" and e.get("open") and e.get("season") is not None:
+                return f"{e['open']}:s{e['season']}e{e.get('episode', 0)}"
+            return e.get("open") or f"{e['svc']}/{e['id']}"
+
+        def card(e, badge=None, tone="info"):
+            return clean({"key": f"dash:{e['key']}", "id": open_id(e), "title": e["title"],
+                          "subtitle": e.get("subtitle"), "poster": e.get("poster"), "backdrop": e.get("backdrop"),
+                          "overview": e.get("overview"), "badge": badge, "badgeTone": tone})
+
+        # week strip (today + 6)
+        week = []
+        for i in range(7):
+            day = today + timedelta(days=i)
+            es = [e for e in ents if e["date"] == day.isoformat()]
+            week.append({"date": day.isoformat(), "dow": "Today" if i == 0 else day.strftime("%a"),
+                         "day": day.day, "count": len(es),
+                         "markers": [{"kind": e["kind"], "status": e["status"]} for e in es[:6]]})
+
+        yesterday = (today - timedelta(days=1)).isoformat()
+        ready = sorted((e for e in ents if e["kind"] == "tv" and e["status"] == "downloaded"
+                        and e["date"] <= iso_today), key=lambda e: (e["date"], e.get("sort") or ""), reverse=True)
+        ready_cards = [card(e, "New" if e["date"] >= yesterday else fmt_date(e["date"]),
+                            "ok" if e["date"] >= yesterday else "muted") for e in ready]
+        coming = [e for e in ents if e["kind"] == "tv" and e["date"] >= iso_today
+                  and e["status"] in ("upcoming", "airing", "missing", "downloading")
+                  and e["date"] <= (today + timedelta(days=7)).isoformat()]
+        coming_cards = [card(e, ("Today" + (f" {e['time']}" if e.get("time") else "")) if e["date"] == iso_today
+                             else fmt_date(e["date"])) for e in coming]
+        new_movies = []
+        cutoff = (now - timedelta(days=21)).astimezone(timezone.utc).isoformat()
+        for r, ms in d["radarr"]:
+            for m in ms:
+                added = (m.get("movieFile") or {}).get("dateAdded") or ""
+                if m.get("hasFile") and m.get("tmdbId") and added >= cutoff[:19]:
+                    c = r.card(m)
+                    c.update(key=f"dash:movie-{m['tmdbId']}", id=f"movie-{m['tmdbId']}")
+                    new_movies.append((added, c))
+        new_movies = [c for _, c in sorted(new_movies, key=lambda x: x[0], reverse=True)]
+        soon = [e for e in ents if e["kind"] == "movie" and e["date"] > iso_today and e["status"] != "downloaded"]
+        soon_cards = [card(e, fmt_date(e["date"]), "info") for e in soon]
+        for c, e in zip(soon_cards, soon):
+            c["subtitle"] = join(e.get("label"), (e.get("subtitle") or "").split(" · ", 1)[-1] if e.get("subtitle") else None)
+        owned = self.owned()
+        rows = [r for r in (
+            row("Ready to watch", dedupe(ready_cards, 30), "landscape"),
+            row("Coming up this week", dedupe(coming_cards, 30), "landscape"),
+            row("New movies", dedupe(new_movies, 30)),
+            row("Coming soon to your library", dedupe(soon_cards, 30)),
+            row("Trending", [self.mark(c, owned) for c in d["trending"]], key="trending", more=True),
         ) if r["items"]]
-        return page
+
+        hour = now.hour
+        greet = "Good morning" if hour < 12 else "Good afternoon" if hour < 18 else "Good evening"
+        todays = [e for e in ents if e["date"] == iso_today]
+        for e in todays:
+            e["openId"] = open_id(e)
+        hero = next((e.get("backdrop") for e in todays if e.get("backdrop")), None) \
+            or next((c.get("backdrop") for r in rows for c in r["items"] if c.get("backdrop")), None)
+        return {
+            "greeting": greet,
+            "date": f"{now.strftime('%A')} {now.day} {now.strftime('%B')}",
+            "hero": hero,
+            "stats": stats,
+            "today": todays,
+            "week": week,
+            "rows": rows,
+            "alerts": d["health"],
+        }
+
+    # -- pass library actions on to the right Radarr/Sonarr
+    @staticmethod
+    def _target(arg):
+        target, _, sub = (arg or "").partition("|")
+        parts = target.split("/", 2)
+        if len(parts) != 3:
+            raise ApiError("That action is missing its library")
+        return svc(parts[0], parts[1]), parts[2], (sub or None)
+
+    def releases(self, item_id, arg=None):
+        s, tid, sub = self._target(arg)
+        return s.releases(tid, sub)
+
+    def grab_for(self, item_id, guid, indexer_id, arg=None):
+        s, _, _ = self._target(arg)
+        return s.grab(guid, indexer_id)
+
 
     def person(self, pid):
         d = par(p=lambda: self.seerr.cached(f"person-{pid}", 3600, lambda: self.seerr._req("GET", f"/person/{pid}")),
@@ -1613,9 +2213,110 @@ class Hub:
         return {"item": item, "facts": f, "actions": [], "rows": rows}
 
     def act(self, item_id, act, arg=None, choice=None):
-        res = self.seerr.act(item_id, act, arg, choice)
+        if act and act.startswith("lib_"):
+            target, tid, sub = self._target(arg)
+            res = dict(target.act(tid, act[4:], sub, choice))
+            res["close"] = False  # stay on the title page; it just shows the new state
+            res["refresh"] = True
+        else:
+            res = self.seerr.act(item_id, act, arg, choice)
         self.drop_home()
+        self.drop_dash()
         return res
+
+
+
+# ---------------------------------------------------------------- v2 libraries
+
+class Library:
+    """Harbour v2's Movies and TV tabs: every Radarr (or every Sonarr) merged, one card per title,
+    each opening the one-page-per-title view from the Home hub."""
+    kind = "lib"
+
+    def __init__(self, inst, name, icon, member_kind):
+        self.inst, self.name, self.icon, self.member_kind = inst, name, icon, member_kind
+
+    def info(self):
+        return {"kind": self.kind, "inst": self.inst, "name": self.name, "icon": self.icon}
+
+    def members(self):
+        return [s for s in SERVICES.values() if s.kind == self.member_kind]
+
+    def retarget(self, c, s, first):
+        c = dict(c)
+        ref = c.get("ref") or ""
+        if re.fullmatch(r"(movie|tv)-\d+", ref):
+            c["id"] = ref
+            c["key"] = f"lib:{ref}"
+        else:
+            c["id"] = f"{s.kind}/{s.inst}/{c['id']}"
+            c["key"] = f"lib:{c['key']}"
+        if not first:
+            c["subtitle"] = join(c.get("subtitle"), s.name)
+        return c
+
+    def home_cached(self):
+        return self.home()
+
+    def home(self):
+        ms = self.members()
+        pages = par(**{str(i): (lambda s=s: safe(s.home_cached, s.name, {"rows": []})) for i, s in enumerate(ms)})
+        rows, order = {}, []
+        for i, s in enumerate(ms):
+            for r in pages[str(i)].get("rows") or []:
+                t = r["title"]
+                if t not in rows:
+                    rows[t] = {"title": t, "style": r.get("style", "poster"), "items": []}
+                    order.append(t)
+                rows[t]["items"] += [self.retarget(c, s, i == 0) for c in r.get("items") or []]
+        out = []
+        for t in order:
+            r = rows[t]
+            r["items"] = dedupe(r["items"], 80)
+            if r["items"]:
+                out.append(r)
+        hero = next((i for r in out for i in r["items"] if i.get("backdrop")), None)
+        return {"hero": hero, "rows": out}
+
+    def search(self, q):
+        items = []
+        for i, s in enumerate(self.members()):
+            items += [self.retarget(c, s, i == 0) for c in safe(lambda: s.search(q)["items"], s.name, [])]
+        items = dedupe(items, 100000)
+        items.sort(key=lambda c: re.sub(r"^(the|a|an) ", "", (c.get("title") or "").lower()))
+        return {"items": items}
+
+    def row_page(self, key, page=1):
+        raise ApiError("This row can't be expanded")
+
+    @staticmethod
+    def _split(item_id):
+        parts = item_id.split("/", 2)
+        return (svc(parts[0], parts[1]), parts[2]) if len(parts) == 3 else (None, item_id)
+
+    def _hub(self):
+        if not HUB:
+            raise ApiError("This needs Jellyseerr configured")
+        return HUB
+
+    def detail(self, item_id):
+        s, tid = self._split(item_id)
+        return s.detail(tid) if s else self._hub().detail(tid)
+
+    def act(self, item_id, act, arg=None, choice=None):
+        s, tid = self._split(item_id)
+        return s.act(tid, act, arg, choice) if s else self._hub().act(tid, act, arg, choice)
+
+    def releases(self, item_id, arg=None):
+        s, tid = self._split(item_id)
+        return s.releases(tid, arg) if s else self._hub().releases(tid, arg)
+
+    def grab_for(self, item_id, guid, indexer_id, arg=None):
+        s, _ = self._split(item_id)
+        return s.grab(guid, indexer_id) if s else self._hub().grab_for(item_id, guid, indexer_id, arg)
+
+    def season(self, item_id, n):
+        return self._hub().season(item_id, n)
 
 
 # ---------------------------------------------------------------- File Station
@@ -1962,6 +2663,92 @@ def downloads_snapshot():
     return {"clients": clients, "items": items}
 
 
+
+# ---------------------------------------------------------------- Trailers, played inside Harbour
+#
+# yt-dlp finds the actual video and audio streams behind a YouTube trailer; the gateway then
+# relays them to the TV so Harbour's own player can play them (no YouTube app, no leaving
+# Harbour). YouTube changes things often, so the gateway keeps its own copy of yt-dlp up to
+# date in the background (falls back to the copy baked into the image).
+
+YT_DIR = os.environ.get("HARBOUR_YTDLP_DIR", "/tmp/harbour-ytdlp")
+YT_FORMAT = ("bv*[height<=1080][vcodec^=avc1][ext=mp4]+ba[ext=m4a]/"
+             "bv*[height<=1080][vcodec^=avc1]+ba/b[height<=1080][ext=mp4]/b[height<=1080]/b")
+_YT = {}
+
+
+def trailer_conf():
+    c = CFG.get("trailers", {})
+    return c if isinstance(c, dict) else {"enabled": bool(c)}
+
+
+def _yt_env():
+    env = dict(os.environ)
+    if os.path.isdir(os.path.join(YT_DIR, "yt_dlp")):
+        env["PYTHONPATH"] = YT_DIR + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
+    env.setdefault("HOME", "/tmp")
+    env.setdefault("XDG_CACHE_HOME", "/tmp/.cache")
+    env.setdefault("DENO_DIR", "/tmp/.deno")
+    return env
+
+
+def trailers_available():
+    if trailer_conf().get("enabled", True) is False:
+        return False
+    import importlib.util
+    return os.path.isdir(os.path.join(YT_DIR, "yt_dlp")) or importlib.util.find_spec("yt_dlp") is not None
+
+
+def yt_resolve(key, fresh=False):
+    if not re.fullmatch(r"[A-Za-z0-9_-]{6,20}", key or ""):
+        raise ApiError("Bad video id")
+    hit = _YT.get(key)
+    if hit and not fresh and time.time() - hit[0] < 3 * 3600:
+        return hit[1]
+    cmd = [sys.executable, "-m", "yt_dlp", "-J", "--no-warnings", "--no-playlist", "--no-progress",
+           "-f", YT_FORMAT, f"https://www.youtube.com/watch?v={key}"]
+    try:
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=90, env=_yt_env())
+    except subprocess.TimeoutExpired:
+        raise ApiError("YouTube took too long to answer", 504)
+    if p.returncode != 0:
+        last = [ln for ln in (p.stderr or "").strip().splitlines() if ln.strip()][-1:]
+        raise ApiError(f"YouTube: {last[0][:220] if last else 'lookup failed'}", 502)
+    try:
+        info = json.loads(p.stdout)
+    except ValueError:
+        raise ApiError("YouTube: unreadable answer", 502)
+    streams = []
+    for f in info.get("requested_formats") or [info]:
+        if f.get("url"):
+            streams.append({"url": f["url"], "headers": f.get("http_headers") or info.get("http_headers") or {},
+                            "height": f.get("height"), "vcodec": f.get("vcodec"), "acodec": f.get("acodec")})
+    if not streams:
+        raise ApiError("YouTube: no playable stream", 502)
+    out = {"title": info.get("title"), "duration": info.get("duration"), "streams": streams}
+    _YT[key] = (time.time(), out)
+    return out
+
+
+def yt_update_loop():
+    """Keep a fresh yt-dlp in YT_DIR (daily). Harmless if pip or the network isn't there."""
+    if not trailers_available() or trailer_conf().get("auto_update", True) is False:
+        return
+    time.sleep(30)
+    while True:
+        try:
+            p = subprocess.run([sys.executable, "-m", "pip", "install", "-q", "--disable-pip-version-check",
+                                "--no-cache-dir", "--upgrade", "--target", YT_DIR, "yt-dlp[default]"],
+                               capture_output=True, text=True, timeout=600, env=_yt_env())
+            if p.returncode == 0:
+                log.info("yt-dlp is up to date")
+            else:
+                log.warning("yt-dlp update failed: %s", (p.stderr or "")[-300:])
+        except Exception as e:
+            log.warning("yt-dlp update failed: %s", e)
+        time.sleep(86400)
+
+
 # ---------------------------------------------------------------- wiring
 
 def init():
@@ -1991,6 +2778,11 @@ def init():
         SERVICES.clear()
         SERVICES[(HUB.kind, HUB.inst)] = HUB
         SERVICES.update(items)
+    LIBS.clear()
+    if HUB:
+        for inst, name, icon, kind in (("movies", "Movies", "movie", "radarr"), ("tv", "TV", "tv", "sonarr")):
+            if any(x.kind == kind for x in SERVICES.values()):
+                LIBS[("lib", inst)] = Library(inst, name, icon, kind)
     for key, cls in (("nzbget", NzbGet), ("qbittorrent", QBittorrent)):
         conf = CFG.get(key)
         for c in (conf if isinstance(conf, list) else [conf] if conf else []):
@@ -2090,10 +2882,11 @@ def _cal_episodes(so, cal, queued, s0, s1, now):
             "key": f"{so.kind}:{so.inst}:e{e.get('id')}",
             "date": day.isoformat(), "time": _clock(at), "sort": at.isoformat(),
             "kind": "tv", "svc": f"{so.kind}/{so.inst}", "source": so.name,
+            "season": e.get("seasonNumber"), "episode": e.get("episodeNumber"), "episodeId": e.get("id"),
             "id": str(e.get("seriesId")), "open": f"tv-{s['tmdbId']}" if s.get("tmdbId") else None,
             "title": s.get("title") or "?",
             "subtitle": join(Sonarr.sxe(e), e.get("title")),
-            "poster": so.image(imgs, "poster", "w185"), "backdrop": so.image(imgs, "fanart", "original"),
+            "poster": so.image(imgs, "poster", "w185"), "backdrop": so.image(imgs, "fanart", "w780"),
             "overview": e.get("overview") or s.get("overview"),
             "status": st, "label": label, "tag": tag, "network": s.get("network"),
         }))
@@ -2136,7 +2929,7 @@ def _cal_movies(ra, cal, queued, s0, s1, now):
                 "id": str(m.get("id")), "open": f"movie-{m['tmdbId']}" if m.get("tmdbId") else None,
                 "title": m.get("title") or "?",
                 "subtitle": join(what, m.get("year"), fmt_runtime(m.get("runtime"))),
-                "poster": ra.image(imgs, "poster", "w185"), "backdrop": ra.image(imgs, "fanart", "original"),
+                "poster": ra.image(imgs, "poster", "w185"), "backdrop": ra.image(imgs, "fanart", "w780"),
                 "overview": m.get("overview"),
                 "status": st, "label": label, "tag": what if st in ("downloaded", "downloading", "missing") else None,
                 "quality": Radarr.quality(m) if m.get("hasFile") else None,
@@ -2150,7 +2943,7 @@ def load_config():
 
 
 def svc(kind, inst):
-    s = SERVICES.get((kind, inst))
+    s = SERVICES.get((kind, inst)) or LIBS.get((kind, inst))
     if not s:
         raise ApiError(f"No service {kind}/{inst}", 404)
     return s
@@ -2235,6 +3028,9 @@ def config():
                    downloads=bool(CLIENTS),
                    plex=PLEX is not None,
                    calendar=any(s.kind in ("radarr", "sonarr") for s in SERVICES.values()),
+                   libraries=[l.info() for l in LIBS.values()],
+                   dashboard=HUB is not None,
+                   trailers=trailers_available(),
                    repo=CFG.get("github_repo") or DEFAULT_REPO)
 
 
@@ -2359,6 +3155,8 @@ def svc_releases(kind, inst, item_id):
 def svc_grab(kind, inst, item_id):
     s = svc(kind, inst)
     b = request.get_json(silent=True) or {}
+    if hasattr(s, "grab_for"):  # Home / libraries pass on to the right Radarr/Sonarr
+        return jsonify(s.grab_for(item_id, b.get("guid"), b.get("indexerId"), b.get("arg")))
     if not hasattr(s, "grab"):
         raise ApiError("Manual search isn't available here")
     return jsonify(s.grab(b.get("guid"), b.get("indexerId")))
@@ -2389,6 +3187,52 @@ def files_list():
 @app.post("/api/files/op")
 def files_op():
     return jsonify(files().op(request.get_json(silent=True) or {}))
+
+
+@app.get("/api/dash")
+def dash_route():
+    if not HUB:
+        raise ApiError("The dashboard needs Jellyseerr configured", 404)
+    return jsonify(HUB.dash())
+
+
+@app.get("/api/svc/<kind>/<inst>/season/<item_id>/<int:n>")
+def svc_season(kind, inst, item_id, n):
+    s = svc(kind, inst)
+    if not hasattr(s, "season"):
+        raise ApiError("Season pages aren't available here")
+    return jsonify(s.season(item_id, n))
+
+
+@app.get("/api/trailer/<key>")
+def trailer(key):
+    if not trailers_available():
+        raise ApiError("In-app trailers aren't set up on the gateway", 404)
+    t = yt_resolve(key)
+    st = t["streams"]
+    return jsonify(clean({"title": t.get("title"), "duration": t.get("duration"), "height": st[0].get("height"),
+                          "video": f"/yt/{key}/0", "audio": f"/yt/{key}/1" if len(st) > 1 else None}))
+
+
+@app.get("/yt/<key>/<int:i>")
+def yt_stream(key, i):
+    """Relay one trailer stream to the TV (Range requests pass straight through, so seeking works)."""
+    for attempt in (0, 1):
+        t = yt_resolve(key, fresh=attempt == 1)
+        if i >= len(t["streams"]):
+            return Response(status=404)
+        st = t["streams"][i]
+        headers = dict(st["headers"])
+        if request.headers.get("Range"):
+            headers["Range"] = request.headers["Range"]
+        r = requests.get(st["url"], headers=headers, stream=True, timeout=30)
+        if r.status_code == 403 and attempt == 0:  # links expire — look it up again once
+            r.close()
+            continue
+        out = {k: r.headers[k] for k in ("Content-Type", "Content-Length", "Content-Range") if k in r.headers}
+        out["Accept-Ranges"] = "bytes"
+        return Response(stream_with_context(r.iter_content(256 * 1024)), status=r.status_code, headers=out)
+    return Response(status=502)
 
 
 @app.get("/api/calendar")
@@ -2422,4 +3266,5 @@ else:
 
 if __name__ == "__main__":
     threading.Thread(target=warm_loop, daemon=True).start()
+    threading.Thread(target=yt_update_loop, daemon=True).start()
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", "8765")), threaded=True)

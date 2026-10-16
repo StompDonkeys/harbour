@@ -1,2 +1,4 @@
 flask>=3.0,<4
 requests>=2.31,<3
+# In-app trailers: finds the real streams behind a YouTube video (kept up to date at runtime too)
+yt-dlp[default]
