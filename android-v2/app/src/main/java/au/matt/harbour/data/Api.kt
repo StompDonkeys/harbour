@@ -42,6 +42,10 @@ data class GatewayConfig(
     val downloads: Boolean = false,
     val plex: Boolean = false,
     val calendar: Boolean = false,
+    /** Harbour v2: merged Movies / TV libraries, the Home dashboard and in-app trailers. */
+    val libraries: List<ServiceInfo> = emptyList(),
+    val dashboard: Boolean = false,
+    val trailers: Boolean = false,
     val repo: String = "StompDonkeys/harbour",
     val version: String = "",
 )
@@ -105,6 +109,8 @@ data class ActionDef(
     val opens: String? = null,
     /** Ask the user to pick one of these first; the pick is sent as `choice`. */
     val choose: Choice? = null,
+    /** A little menu of further actions (opens == "menu"). */
+    val items: List<ActionDef> = emptyList(),
 )
 
 @Serializable
@@ -144,6 +150,101 @@ data class Detail(
     val people: List<Person> = emptyList(),
     /** Extra rows like "More like this" or a person's filmography. */
     val rows: List<MediaRow> = emptyList(),
+    // ---- v2 title page
+    val tagline: String? = null,
+    val meta: List<String> = emptyList(),
+    val ratings: List<Fact> = emptyList(),
+    val status: List<Chip> = emptyList(),
+    val videos: List<Video> = emptyList(),
+    val providers: List<Provider> = emptyList(),
+    val seasonCards: List<MediaItem> = emptyList(),
+    val logo: String? = null,
+)
+
+@Serializable
+data class Chip(val text: String, val tone: String? = null)
+
+@Serializable
+data class Video(val key: String, val name: String = "Video", val type: String? = null, val thumb: String? = null)
+
+@Serializable
+data class Provider(val name: String = "", val logo: String? = null)
+
+// ------------------------------------------------------------------ v2 season page
+
+@Serializable
+data class SeasonShow(val id: String, val title: String = "", val backdrop: String? = null, val poster: String? = null)
+
+@Serializable
+data class SeasonInfo(
+    val number: Int,
+    val label: String,
+    val overview: String? = null,
+    val poster: String? = null,
+    val meta: String? = null,
+)
+
+@Serializable
+data class SeasonRef(val number: Int, val label: String)
+
+@Serializable
+data class EpisodeInfo(
+    val key: String,
+    val number: Int,
+    val label: String,
+    val title: String,
+    val overview: String? = null,
+    val still: String? = null,
+    val airDate: String? = null,
+    val runtime: String? = null,
+    val rating: String? = null,
+    val status: String = "none",
+    val statusLabel: String = "",
+    val watched: Boolean = false,
+    val progress: Float? = null,
+    val actions: List<ActionDef> = emptyList(),
+)
+
+@Serializable
+data class SeasonPage(
+    val show: SeasonShow,
+    val season: SeasonInfo,
+    val seasons: List<SeasonRef> = emptyList(),
+    val actions: List<ActionDef> = emptyList(),
+    val episodes: List<EpisodeInfo> = emptyList(),
+    val videos: List<Video> = emptyList(),
+)
+
+// ------------------------------------------------------------------ v2 dashboard
+
+@Serializable
+data class Stat(val label: String, val value: String, val sub: String? = null, val tone: String? = null)
+
+@Serializable
+data class Marker(val kind: String, val status: String)
+
+@Serializable
+data class WeekDay(val date: String, val dow: String, val day: Int, val count: Int = 0, val markers: List<Marker> = emptyList())
+
+@Serializable
+data class Dash(
+    val greeting: String = "",
+    val date: String = "",
+    val hero: String? = null,
+    val stats: List<Stat> = emptyList(),
+    val today: List<CalEntry> = emptyList(),
+    val week: List<WeekDay> = emptyList(),
+    val rows: List<MediaRow> = emptyList(),
+    val alerts: List<Chip> = emptyList(),
+)
+
+@Serializable
+data class TrailerInfo(
+    val title: String? = null,
+    val duration: Double? = null,
+    val height: Int? = null,
+    val video: String,
+    val audio: String? = null,
 )
 
 @Serializable
@@ -362,11 +463,19 @@ suspend fun Gateway.runAction(s: ServiceInfo, id: String, a: ActionDef, choice: 
 suspend fun Gateway.releases(s: ServiceInfo, id: String, arg: String?): ReleaseList =
     get("/api/svc/${s.kind}/${s.inst}/item/${Gateway.enc(id)}/releases?arg=${Gateway.enc(arg ?: "")}")
 
-suspend fun Gateway.grab(s: ServiceInfo, id: String, r: Release): ActionResult =
+suspend fun Gateway.grab(s: ServiceInfo, id: String, r: Release, arg: String? = null): ActionResult =
     post("/api/svc/${s.kind}/${s.inst}/item/${Gateway.enc(id)}/grab", buildJsonObject {
         put("guid", r.guid)
         put("indexerId", r.indexerId)
+        if (arg != null) put("arg", arg)
     })
+
+suspend fun Gateway.dash(): Dash = get("/api/dash")
+
+suspend fun Gateway.season(s: ServiceInfo, showId: String, n: Int): SeasonPage =
+    get("/api/svc/${s.kind}/${s.inst}/season/${Gateway.enc(showId)}/$n")
+
+suspend fun Gateway.trailer(key: String): TrailerInfo = get("/api/trailer/${Gateway.enc(key)}")
 
 suspend fun Gateway.downloads(): Downloads = get("/api/downloads")
 
@@ -460,6 +569,10 @@ data class CalEntry(
     val tag: String? = null,
     val network: String? = null,
     val quality: String? = null,
+    val season: Int? = null,
+    val episode: Int? = null,
+    /** Where tapping it goes: tv-<tmdb>:s1e2 (an episode), movie-<tmdb>, or kind/inst/id. */
+    val openId: String? = null,
 )
 
 @Serializable

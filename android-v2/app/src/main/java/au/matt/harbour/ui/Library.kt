@@ -141,7 +141,7 @@ private fun LibraryContent(
     Box(Modifier.fillMaxSize()) {
         Backdrop(backdrop)
         Column(Modifier.fillMaxSize()) {
-            Spacer(Modifier.height(78.dp))
+            Spacer(Modifier.height(34.dp))
             Crossfade(targetState = shown, animationSpec = tween(350), label = "hero") { item ->
                 InfoPanel(item, Modifier.fillMaxWidth().height(172.dp), label = featuredRow)
             }

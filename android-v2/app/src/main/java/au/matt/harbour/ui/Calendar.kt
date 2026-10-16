@@ -85,7 +85,7 @@ private val WEEKDAYS = listOf("Monday", "Tuesday", "Wednesday", "Thursday", "Fri
 private val Cinema = Color(0xFFBF5AF2)
 private val Airing = Color(0xFF64D2FF)
 
-private fun statusColor(s: String): Color = when (s) {
+fun calStatusColor(s: String): Color = when (s) {
     "downloaded" -> HColors.Ok
     "downloading" -> HColors.Warn
     "airing" -> Airing
@@ -105,14 +105,15 @@ private object CalCache {
 // ------------------------------------------------------------------ screen
 
 @Composable
-fun CalendarScreen(onOpen: (CalEntry) -> Unit) {
+fun CalendarScreen(onOpen: (CalEntry) -> Unit, initialDate: String? = null) {
     val gw = LocalGateway.current
     val toaster = LocalToaster.current
     val today = remember { Ymd.today() }
 
-    var monthIso by rememberSaveable { mutableStateOf(Ymd(today.y, today.m, 1).iso) }
+    val start = initialDate?.let { Ymd.parse(it) } ?: today
+    var monthIso by rememberSaveable { mutableStateOf(Ymd(start.y, start.m, 1).iso) }
     val month = Ymd.parse(monthIso) ?: Ymd(today.y, today.m, 1)
-    var selIso by rememberSaveable { mutableStateOf(today.iso) }
+    var selIso by rememberSaveable { mutableStateOf(start.iso) }
     val selected = Ymd.parse(selIso) ?: today
     var filter by rememberSaveable { mutableStateOf("all") }        // all | tv | movie
     var unmonitored by rememberSaveable { mutableStateOf(false) }
@@ -176,7 +177,7 @@ fun CalendarScreen(onOpen: (CalEntry) -> Unit) {
 
     Box(Modifier.fillMaxSize()) {
         Backdrop(art, dim = 1.25f)
-        Row(Modifier.fillMaxSize().padding(start = 48.dp, end = 40.dp, top = 76.dp, bottom = 20.dp)) {
+        Row(Modifier.fillMaxSize().padding(start = 40.dp, end = 36.dp, top = 30.dp, bottom = 20.dp)) {
             // ---------------------------------------------------------- left: month grid
             Column(Modifier.width(452.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -406,7 +407,7 @@ private fun Markers(entries: List<CalEntry>, dimmed: Boolean) {
         verticalAlignment = Alignment.CenterVertically) {
         val shown = entries.sortedBy { if (it.kind == "movie") 0 else 1 }.take(4)
         shown.forEach { e ->
-            val c = statusColor(e.status).let { if (dimmed) it.copy(alpha = 0.35f) else it }
+            val c = calStatusColor(e.status).let { if (dimmed) it.copy(alpha = 0.35f) else it }
             Box(
                 Modifier
                     .size(width = if (e.kind == "movie") 12.dp else 5.dp, height = 5.dp)
@@ -427,7 +428,7 @@ private fun Legend() {
         listOf("downloaded" to "Have it", "downloading" to "Downloading", "missing" to "Missing",
             "upcoming" to "Upcoming", "cinema" to "Cinema").forEach { (s, l) ->
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Box(Modifier.size(6.dp).clip(CircleShape).background(statusColor(s)))
+                Box(Modifier.size(6.dp).clip(CircleShape).background(calStatusColor(s)))
                 Spacer(Modifier.width(5.dp))
                 Text(l, fontSize = 11.sp, color = HColors.TextDim)
             }
@@ -449,7 +450,7 @@ private fun EntryRow(
     onClick: () -> Unit,
 ) {
     val gw = LocalGateway.current
-    val tone = statusColor(e.status)
+    val tone = calStatusColor(e.status)
     FocusBox(
         onClick = onClick,
         modifier = modifier.fillMaxWidth(),

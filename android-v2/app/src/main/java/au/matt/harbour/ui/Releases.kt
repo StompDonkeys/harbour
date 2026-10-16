@@ -135,7 +135,7 @@ fun ReleasesScreen(svc: ServiceInfo, itemId: String, arg: String?, title: String
                 busy = true
                 scope.launch {
                     try {
-                        toaster.show(gw.grab(svc, itemId, r).message)
+                        toaster.show(gw.grab(svc, itemId, r, arg).message)
                         cache.invalidate(svc)
                         busy = false
                         onDone()

@@ -58,6 +58,7 @@ import au.matt.harbour.data.ActionDef
 import au.matt.harbour.data.Detail
 import au.matt.harbour.data.Episode
 import au.matt.harbour.data.Season
+import au.matt.harbour.data.Video
 import au.matt.harbour.data.ServiceInfo
 import au.matt.harbour.data.detail
 import au.matt.harbour.data.runAction
@@ -76,6 +77,7 @@ fun DetailScreen(
     onOpenItem: (ref: String) -> Unit = {},
     onOpenId: (id: String) -> Unit = {},
     onPlay: (ref: String) -> Unit = {},
+    onTrailer: (key: String, title: String) -> Unit = { _, _ -> },
 ) {
     val context = LocalContext.current
     val gw = LocalGateway.current
@@ -89,6 +91,7 @@ fun DetailScreen(
     var choosing by remember { mutableStateOf<ActionDef?>(null) }
     var confirming by remember { mutableStateOf<Pending?>(null) }
     var episodeMenu by remember { mutableStateOf<Episode?>(null) }
+    var actionMenu by remember { mutableStateOf<ActionDef?>(null) }
 
     LaunchedEffect(reload) {
         error = null
@@ -121,6 +124,8 @@ fun DetailScreen(
     }
     val trigger: (ActionDef) -> Unit = { a ->
         when {
+            a.opens == "menu" && a.items.isNotEmpty() -> actionMenu = a
+            a.opens == "trailer" && a.arg != null -> onTrailer(a.arg, detail?.item?.title ?: "Trailer")
             a.opens == "releases" -> onOpenReleases(a.arg, detail?.item?.title ?: "")
             a.opens == "item" && a.arg != null -> onOpenItem(a.arg)
             a.opens == "youtube" && a.arg != null -> {
@@ -153,7 +158,7 @@ fun DetailScreen(
     val err = error
     when {
         d != null -> DetailContent(svc, d, onAction = trigger, onBack = onClose, onEpisode = { episodeMenu = it },
-            onOpenId = onOpenId)
+            onOpenId = onOpenId, onTrailer = { v -> onTrailer(v.key, v.name) })
         err != null -> ErrorPanel(err, onRetry = { reload++ })
         else -> Loading()
     }
@@ -168,6 +173,18 @@ fun DetailScreen(
                 ep.actions.getOrNull(i)?.let(trigger)
             },
             onDismiss = { episodeMenu = null },
+        )
+    }
+    actionMenu?.let { m ->
+        MenuDialog(
+            title = m.label,
+            subtitle = detail?.item?.title,
+            items = m.items.map { it.label to it.style },
+            onPick = { i ->
+                actionMenu = null
+                m.items.getOrNull(i)?.let(trigger)
+            },
+            onDismiss = { actionMenu = null },
         )
     }
     choosing?.let { a ->
@@ -206,8 +223,10 @@ private fun DetailContent(
     onBack: () -> Unit,
     onEpisode: (Episode) -> Unit,
     onOpenId: (String) -> Unit,
+    onTrailer: (Video) -> Unit,
 ) {
     val gw = LocalGateway.current
+    val rich = d.meta.isNotEmpty()
     val firstButton = remember { FocusRequester() }
     var grabbed by remember { mutableStateOf(false) }
     var seasonIndex by rememberSaveable { mutableIntStateOf(0) }
@@ -237,7 +256,9 @@ private fun DetailContent(
                             Spacer(Modifier.width(28.dp))
                         }
                     }
-                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    if (rich) {
+                        RichHeader(d, Modifier.weight(1f))
+                    } else Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         d.item.subtitle?.let {
                             Text(it.uppercase(), fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.4.sp,
                                 color = HColors.TextDim, maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -281,11 +302,15 @@ private fun DetailContent(
                     } else {
                         itemsIndexed(d.actions, key = { i, a -> "$i:${a.id}" }) { i, a ->
                             TvButton(
-                                text = a.label.removePrefix("▶").trim(),
+                                text = a.label.removePrefix("▶").trim() + if (a.opens == "menu") "  ▾" else "",
                                 onClick = { onAction(a) },
                                 style = a.style,
                                 focusRequester = if (i == 0) firstButton else null,
-                                icon = if (a.opens == "play" || a.opens == "plex") Icons.Filled.PlayArrow else null,
+                                icon = when (a.opens) {
+                                    "play", "plex" -> Icons.Filled.PlayArrow
+                                    "trailer" -> HIcons.Theaters
+                                    else -> null
+                                },
                             )
                         }
                     }
@@ -299,7 +324,19 @@ private fun DetailContent(
                     }
                 }
             }
-            if (gridFacts.isNotEmpty()) {
+            if (d.seasonCards.isNotEmpty()) {
+                item(key = "seasonCards") {
+                    MediaRowView(
+                        svc = svc, row = au.matt.harbour.data.MediaRow("Seasons", items = d.seasonCards), rowIndex = 90,
+                        onOpen = onOpenId, onFocusItem = { _, _ -> }, shouldGrab = { false }, onGrabbed = {},
+                        edgePadding = 2.dp,
+                    )
+                }
+            }
+            if (d.videos.isNotEmpty()) {
+                item(key = "videos") { VideoRow("Trailers & extras", d.videos, onTrailer) }
+            }
+            if (gridFacts.isNotEmpty() && !rich) {
                 item(key = "facts") { FactsGrid(gridFacts) }
             }
             if (d.people.isNotEmpty()) {
@@ -322,6 +359,14 @@ private fun DetailContent(
                         onFocusItem = { _, _ -> }, shouldGrab = { false }, onGrabbed = {},
                         edgePadding = 2.dp,
                     )
+                }
+            }
+            if (gridFacts.isNotEmpty() && rich) {
+                item(key = "facts") {
+                    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Text("More details", fontSize = 17.sp, fontWeight = FontWeight.Bold)
+                        FactsGrid(gridFacts)
+                    }
                 }
             }
             if (d.seasons.isNotEmpty()) {
@@ -506,6 +551,132 @@ private fun EpisodeRow(ep: Episode, onClick: () -> Unit) {
                 fontSize = if (f) 13.sp else 18.sp,
                 fontWeight = FontWeight.Bold,
             )
+        }
+    }
+}
+
+
+/** Harbour v2 title header: logo or title, the meta line, ratings, status, tagline, story, where to stream. */
+@Composable
+private fun RichHeader(d: Detail, modifier: Modifier) {
+    val gw = LocalGateway.current
+    Column(modifier, verticalArrangement = Arrangement.spacedBy(9.dp)) {
+        val logo = gw.img(d.logo)
+        if (logo != null) {
+            AsyncImage(model = logo, contentDescription = d.item.title, contentScale = ContentScale.Fit,
+                alignment = Alignment.CenterStart,
+                modifier = Modifier.height(86.dp).widthIn(max = 420.dp))
+        } else {
+            Text(d.item.title, fontSize = 40.sp, fontWeight = FontWeight.ExtraBold, letterSpacing = (-0.8).sp,
+                maxLines = 2, overflow = TextOverflow.Ellipsis, lineHeight = 43.sp)
+        }
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            Text(d.meta.joinToString("  ·  "), fontSize = 13.sp, color = HColors.Text.copy(alpha = 0.86f),
+                fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f, fill = false))
+            d.ratings.take(3).forEach { r ->
+                Text(
+                    buildString {
+                        append(when (r.label) { "Rotten Tomatoes" -> "RT"; "Audience" -> "Audience"; else -> r.label })
+                        append("  ")
+                        append(r.value)
+                    },
+                    fontSize = 11.sp, fontWeight = FontWeight.Bold, maxLines = 1,
+                    color = if (r.label == "IMDb") Color(0xFF0A0A0B) else HColors.Text,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(5.dp))
+                        .background(if (r.label == "IMDb") Color(0xFFF5C518) else Color.White.copy(alpha = 0.14f))
+                        .padding(horizontal = 6.dp, vertical = 2.dp),
+                )
+            }
+        }
+        if (d.status.isNotEmpty()) {
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                d.status.take(4).forEach { c -> StatusChip(c) }
+            }
+        }
+        d.tagline?.let {
+            Text(it, fontSize = 15.sp, fontStyle = androidx.compose.ui.text.font.FontStyle.Italic,
+                color = HColors.Text, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        }
+        d.item.overview?.let {
+            Text(it, color = HColors.Text.copy(alpha = 0.82f), fontSize = 14.sp, lineHeight = 20.sp,
+                maxLines = 4, overflow = TextOverflow.Ellipsis, modifier = Modifier.widthIn(max = 600.dp))
+        }
+        if (d.providers.isNotEmpty()) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text("STREAMING ON", fontSize = 10.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.2.sp,
+                    color = HColors.TextDim)
+                Spacer(Modifier.width(2.dp))
+                d.providers.forEach { p ->
+                    val img = gw.img(p.logo)
+                    if (img != null) {
+                        AsyncImage(model = img, contentDescription = p.name, contentScale = ContentScale.Crop,
+                            modifier = Modifier.size(24.dp).clip(RoundedCornerShape(6.dp)))
+                    } else {
+                        Text(p.name, fontSize = 12.sp, color = HColors.Text)
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun StatusChip(c: au.matt.harbour.data.Chip) {
+    val col = toneColor(c.tone)
+    val muted = c.tone == null || c.tone == "muted"
+    Row(
+        Modifier
+            .clip(RoundedCornerShape(7.dp))
+            .background(if (muted) Color.White.copy(alpha = 0.10f) else col.copy(alpha = 0.22f))
+            .border(1.dp, if (muted) HColors.GlassEdge else col.copy(alpha = 0.55f), RoundedCornerShape(7.dp))
+            .padding(horizontal = 8.dp, vertical = 3.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        if (!muted) {
+            Box(Modifier.size(6.dp).clip(CircleShape).background(col))
+            Spacer(Modifier.width(6.dp))
+        }
+        Text(c.text, fontSize = 11.sp, fontWeight = FontWeight.SemiBold, color = HColors.Text, maxLines = 1)
+    }
+}
+
+/** Trailers, teasers and featurettes; OK plays them right here. */
+@Composable
+fun VideoRow(title: String, videos: List<Video>, onPlay: (Video) -> Unit) {
+    val gw = LocalGateway.current
+    Column {
+        Text(title, fontSize = 17.sp, fontWeight = FontWeight.Bold)
+        LazyRow(
+            horizontalArrangement = Arrangement.spacedBy(16.dp),
+            contentPadding = PaddingValues(vertical = 12.dp, horizontal = 2.dp),
+        ) {
+            items(videos, key = { it.key }) { v ->
+                Column(Modifier.width(220.dp)) {
+                    FocusBox(onClick = { onPlay(v) }, modifier = Modifier.width(220.dp).aspectRatio(16f / 9f),
+                        shape = RoundedCornerShape(14.dp), focusedScale = 1.07f) { f ->
+                        Box(Modifier.fillMaxSize().background(HColors.Surface)) {
+                            AsyncImage(model = gw.img(v.thumb), contentDescription = v.name, contentScale = ContentScale.Crop,
+                                modifier = Modifier.fillMaxSize())
+                            Box(Modifier.matchParentSize().background(Color.Black.copy(alpha = if (f) 0.05f else 0.25f)))
+                            Box(
+                                Modifier.align(Alignment.Center).size(44.dp).clip(CircleShape)
+                                    .background(if (f) Color.White else Color.Black.copy(alpha = 0.5f)),
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                androidx.compose.material3.Icon(Icons.Filled.PlayArrow, contentDescription = null,
+                                    tint = if (f) Color.Black else Color.White, modifier = Modifier.size(26.dp))
+                            }
+                            Sheen(f)
+                        }
+                    }
+                    Spacer(Modifier.height(8.dp))
+                    Text(v.name, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, maxLines = 1,
+                        overflow = TextOverflow.Ellipsis)
+                    v.type?.let { Text(it, fontSize = 11.sp, color = HColors.TextDim, maxLines = 1) }
+                }
+            }
         }
     }
 }

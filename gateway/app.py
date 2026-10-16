@@ -2249,7 +2249,7 @@ class Library:
             c["id"] = ref
             c["key"] = f"lib:{ref}"
         else:
-            c["id"] = f"{s.kind}/{s.inst}/{c['id']}"
+            c["id"] = f"{s.kind}~{s.inst}~{c['id']}"  # no '/': it travels in URL paths
             c["key"] = f"lib:{c['key']}"
         if not first:
             c["subtitle"] = join(c.get("subtitle"), s.name)
@@ -2291,7 +2291,7 @@ class Library:
 
     @staticmethod
     def _split(item_id):
-        parts = item_id.split("/", 2)
+        parts = item_id.split("~", 2)
         return (svc(parts[0], parts[1]), parts[2]) if len(parts) == 3 else (None, item_id)
 
     def _hub(self):

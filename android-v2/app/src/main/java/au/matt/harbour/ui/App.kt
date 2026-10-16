@@ -1,14 +1,27 @@
 package au.matt.harbour.ui
 
 import androidx.activity.compose.BackHandler
+import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.width
+import androidx.compose.material.icons.filled.Home
+import androidx.compose.material.icons.filled.Search
+import androidx.compose.ui.focus.focusRestorer
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.scaleIn
-import androidx.compose.animation.slideInVertically
-import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.focusGroup
@@ -69,12 +82,14 @@ sealed interface Screen {
     data class Releases(val svc: ServiceInfo, val itemId: String, val arg: String?, val title: String) : Screen
     data class Player(val ref: String) : Screen
     data object Calendar : Screen
+    data object Dashboard : Screen
+    data class CalendarDay(val date: String) : Screen
+    data class Season(val svc: ServiceInfo, val showId: String, val number: Int, val focusEpisode: Int? = null) : Screen
+    data class Trailer(val key: String, val title: String) : Screen
     data object Downloads : Screen
     data object Files : Screen
     data object Settings : Screen
 }
-
-private data class Tab(val label: String, val root: Screen, val icon: ImageVector? = null)
 
 @Composable
 fun HarbourApp(prefs: Prefs) {
@@ -115,7 +130,8 @@ fun HarbourApp(prefs: Prefs) {
             }
         }
         // Warm every library so switching tabs is instant.
-        for (s in cfg.services) {
+        val warm = if (cfg.dashboard) cfg.libraries + cfg.services.filter { it.kind == "seerr" } else cfg.services
+        for (s in warm) {
             if (cache.homes[s.key] == null) runCatching { cache.homes[s.key] = g.home(s) }
         }
         // Quietly look for a newer build on GitHub.
@@ -188,21 +204,49 @@ fun HarbourApp(prefs: Prefs) {
     }
 }
 
+private data class NavItem(val label: String, val root: Screen, val icon: ImageVector)
+
+private val RailCollapsed = 76.dp
+private val RailExpanded = 236.dp
+
+private fun iconFor(s: ServiceInfo): ImageVector = when (s.kind) {
+    "radarr" -> HIcons.Movie
+    "sonarr" -> HIcons.Tv
+    "seerr" -> HIcons.Explore
+    "hub" -> Icons.Filled.Home
+    "lib" -> if (s.inst == "tv") HIcons.Tv else HIcons.Movie
+    else -> HIcons.Dashboard
+}
+
+private val EpisodeRef = Regex("""(tv-\d+):s(\d+)(?:e(\d+))?""")
+private val TitleRef = Regex("""(movie|tv|person)-\d+""")
+
+@OptIn(ExperimentalComposeUiApi::class)
 @Composable
 private fun MainShell(config: GatewayConfig, settings: @Composable () -> Unit, updateAvailable: Boolean) {
-    val tabs = remember(config) {
+    val hub = remember(config) { config.services.firstOrNull { it.kind == "hub" } }
+    val v2 = config.dashboard && hub != null
+    val items = remember(config) {
         buildList {
-            config.services.forEach { add(Tab(it.name, Screen.Library(it))) }
-            if (config.calendar) add(Tab("Calendar", Screen.Calendar))
-            if (config.downloads) add(Tab("Downloads", Screen.Downloads))
-            if (config.files) add(Tab("Files", Screen.Files))
-            add(Tab("Settings", Screen.Settings, Icons.Filled.Settings))
+            if (v2 && hub != null) {
+                add(NavItem("Search", Screen.Browse(hub, true), Icons.Filled.Search))
+                add(NavItem("Home", Screen.Dashboard, Icons.Filled.Home))
+                config.services.firstOrNull { it.kind == "seerr" }?.let { add(NavItem("Discover", Screen.Library(it), HIcons.Explore)) }
+                config.libraries.forEach { add(NavItem(it.name, Screen.Library(it), iconFor(it))) }
+            } else {
+                config.services.forEach { add(NavItem(it.name, Screen.Library(it), iconFor(it))) }
+            }
+            if (config.calendar) add(NavItem("Calendar", Screen.Calendar, HIcons.Calendar))
+            if (config.downloads) add(NavItem("Downloads", Screen.Downloads, HIcons.Download))
+            if (config.files) add(NavItem("Files", Screen.Files, HIcons.Folder))
+            add(NavItem("Settings", Screen.Settings, Icons.Filled.Settings))
         }
     }
-    var tabIndex by remember { mutableIntStateOf(0) }
-    val stack = remember { mutableStateListOf(tabs[0].root) }
-    val tabRequesters = remember(tabs) { tabs.map { FocusRequester() } }
-    var navFocused by remember { mutableStateOf(false) }
+    val homeIndex = items.indexOfFirst { it.root == Screen.Dashboard }.takeIf { it >= 0 } ?: 0
+    var tabIndex by remember { mutableIntStateOf(homeIndex) }
+    val stack = remember { mutableStateListOf(items[homeIndex].root) }
+    val requesters = remember(items) { items.map { FocusRequester() } }
+    var railFocused by remember { mutableStateOf(false) }
     val contentFocus = remember { FocusRequester() }
     val holder = rememberSaveableStateHolder()
     var backdrop by remember { mutableStateOf<String?>(null) }
@@ -211,7 +255,7 @@ private fun MainShell(config: GatewayConfig, settings: @Composable () -> Unit, u
         if (i != tabIndex || stack.size != 1) {
             tabIndex = i
             stack.clear()
-            stack.add(tabs[i].root)
+            stack.add(items[i].root)
         }
         runCatching { contentFocus.requestFocus() }
     }
@@ -225,21 +269,39 @@ private fun MainShell(config: GatewayConfig, settings: @Composable () -> Unit, u
     }
     val play: (String) -> Unit = { ref -> push(Screen.Player(ref)) }
 
-    // Back: pop a screen; on a tab's first screen, jump up to the tab bar; from there Back leaves the app.
+    /** One place that knows where an id leads: an episode, a title, a person, or an app's own page. */
+    fun open(from: ServiceInfo?, id: String) {
+        val ep = EpisodeRef.matchEntire(id)
+        val parts = id.split("/", limit = 3)
+        when {
+            ep != null && hub != null ->
+                push(Screen.Season(hub, ep.groupValues[1], ep.groupValues[2].toInt(), ep.groupValues[3].toIntOrNull()))
+            parts.size == 3 -> config.services.firstOrNull { it.kind == parts[0] && it.inst == parts[1] }
+                ?.let { push(Screen.Detail(it, parts[2])) }
+            v2 && hub != null && TitleRef.matches(id) -> push(Screen.Detail(hub, id))
+            from != null -> push(Screen.Detail(from, id))
+            hub != null -> push(Screen.Detail(hub, id))
+        }
+    }
+
+    // Back: pop a screen; on a section's first screen, jump to the menu; from there Back leaves the app.
     BackHandler(enabled = stack.size > 1) { pop() }
-    BackHandler(enabled = stack.size == 1 && !navFocused) {
-        runCatching { tabRequesters[tabIndex].requestFocus() }
+    BackHandler(enabled = stack.size == 1 && !railFocused) {
+        runCatching { requesters[tabIndex].requestFocus() }
     }
 
     val screen = stack.last()
-    val showNav = stack.size == 1
+    val showRail = stack.size == 1
+    val inset by animateDpAsState(if (showRail) RailCollapsed else 0.dp, tween(280), label = "inset")
 
     CompositionLocalProvider(LocalBackdrop provides backdrop, LocalBackdropSink provides { backdrop = it }) {
         Box(Modifier.fillMaxSize().background(HColors.Bg)) {
             Box(
                 Modifier
                     .fillMaxSize()
+                    .padding(start = inset)
                     .focusRequester(contentFocus)
+                    .focusRestorer()
                     .focusGroup(),
             ) {
                 AnimatedContent(
@@ -251,27 +313,25 @@ private fun MainShell(config: GatewayConfig, settings: @Composable () -> Unit, u
                     label = "screen",
                 ) { (idx, sc) ->
                     val stateKey = "$idx:$sc"
-                    // Each screen gets its own composition slot and saved state.
                     key(stateKey) {
                         holder.SaveableStateProvider(stateKey) {
-                            ScreenContent(sc, config, settings, ::push, ::pop, play)
+                            ScreenContent(sc, config, settings, ::push, ::pop, play, ::open)
                         }
                     }
                 }
             }
             AnimatedVisibility(
-                visible = showNav,
-                enter = fadeIn(tween(250)) + slideInVertically(tween(300)) { -it },
-                exit = fadeOut(tween(200)) + slideOutVertically(tween(250)) { -it },
-                modifier = Modifier.align(Alignment.TopCenter).padding(top = 18.dp),
+                visible = showRail,
+                enter = fadeIn(tween(250)) + slideInHorizontally(tween(300)) { -it },
+                exit = fadeOut(tween(200)) + slideOutHorizontally(tween(250)) { -it },
             ) {
-                TopNav(
-                    tabs = tabs,
+                Rail(
+                    items = items,
                     selected = tabIndex,
-                    requesters = tabRequesters,
+                    requesters = requesters,
                     onSelect = { selectTab(it) },
-                    onFocusChanged = { navFocused = it },
-                    dotOn = if (updateAvailable) tabs.lastIndex else -1,
+                    onFocusChanged = { railFocused = it },
+                    dotOn = if (updateAvailable) items.lastIndex else -1,
                 )
             }
         }
@@ -286,11 +346,13 @@ private fun ScreenContent(
     push: (Screen) -> Unit,
     pop: () -> Unit,
     play: (String) -> Unit,
+    open: (ServiceInfo?, String) -> Unit,
 ) {
+    val trailer: (String, String) -> Unit = { key, title -> push(Screen.Trailer(key, title)) }
     when (screen) {
         is Screen.Library -> LibraryScreen(
             svc = screen.svc,
-            onOpen = { id -> push(Screen.Detail(screen.svc, id)) },
+            onOpen = { id -> open(screen.svc, id) },
             onBrowse = { search -> push(Screen.Browse(screen.svc, search)) },
             onSeeAll = { key, title -> push(Screen.Category(screen.svc, key, title)) },
             onPlay = if (config.plex) play else null,
@@ -299,26 +361,32 @@ private fun ScreenContent(
             svc = screen.svc,
             key = screen.key,
             title = screen.title,
-            onOpen = { id -> push(Screen.Detail(screen.svc, id)) },
+            onOpen = { id -> open(screen.svc, id) },
         )
         is Screen.Detail -> DetailScreen(
             svc = screen.svc,
             itemId = screen.itemId,
             onClose = pop,
             onOpenReleases = { arg, title -> push(Screen.Releases(screen.svc, screen.itemId, arg, title)) },
-            onOpenId = { id -> push(Screen.Detail(screen.svc, id)) },
-            onOpenItem = { ref ->
-                // "kind/inst/id", e.g. radarr/radarr-truehd/123 — jump to that app's page
-                val parts = ref.split("/", limit = 3)
-                val target = config.services.firstOrNull { parts.size == 3 && it.kind == parts[0] && it.inst == parts[1] }
-                if (target != null) push(Screen.Detail(target, parts[2]))
-            },
+            onOpenId = { id -> open(screen.svc, id) },
+            onOpenItem = { ref -> open(null, ref) },
             onPlay = play,
+            onTrailer = trailer,
+        )
+        is Screen.Season -> SeasonScreen(
+            svc = screen.svc,
+            showId = screen.showId,
+            number = screen.number,
+            focusEpisode = screen.focusEpisode,
+            onOpenReleases = { arg, title -> push(Screen.Releases(screen.svc, screen.showId, arg, title)) },
+            onPlay = play,
+            onTrailer = trailer,
+            onOpenShow = { open(screen.svc, screen.showId) },
         )
         is Screen.Browse -> BrowseScreen(
             svc = screen.svc,
             searchFirst = screen.searchFirst,
-            onOpen = { id -> push(Screen.Detail(screen.svc, id)) },
+            onOpen = { id -> open(screen.svc, id) },
         )
         is Screen.Releases -> ReleasesScreen(
             svc = screen.svc,
@@ -328,96 +396,144 @@ private fun ScreenContent(
             onDone = pop,
         )
         is Screen.Player -> PlayerScreen(ref = screen.ref, onExit = pop)
-        Screen.Calendar -> CalendarScreen(onOpen = { e ->
-            // Prefer the rich Home title page; fall back to the Sonarr/Radarr page.
-            val hub = config.services.firstOrNull { it.kind == "hub" }
-            val open = e.open
-            val target = config.services.firstOrNull { it.key == e.svc }
-            when {
-                hub != null && open != null -> push(Screen.Detail(hub, open))
-                target != null -> push(Screen.Detail(target, e.id))
-            }
-        })
+        is Screen.Trailer -> TrailerScreen(key = screen.key, title = screen.title, onExit = pop)
+        Screen.Dashboard -> DashboardScreen(
+            hub = config.services.first { it.kind == "hub" },
+            onOpen = { id -> open(null, id) },
+            onCalendarDay = { date -> push(Screen.CalendarDay(date)) },
+        )
+        Screen.Calendar -> CalendarScreen(onOpen = { e -> open(null, calTarget(e)) })
+        is Screen.CalendarDay -> CalendarScreen(onOpen = { e -> open(null, calTarget(e)) }, initialDate = screen.date)
         Screen.Downloads -> TopInset { DownloadsScreen() }
         Screen.Files -> TopInset { FilesScreen() }
         Screen.Settings -> TopInset { settings() }
     }
 }
 
-/** Leaves room for the floating tab bar on plain (non-artwork) screens. */
+private fun calTarget(e: au.matt.harbour.data.CalEntry): String = e.openId
+    ?: if (e.kind == "tv" && e.open != null && e.season != null) "${e.open}:s${e.season}e${e.episode ?: 0}"
+    else e.open ?: "${e.svc}/${e.id}"
+
+/** Plain (non-artwork) screens: clear the backdrop and leave a little breathing room up top. */
 @Composable
 private fun TopInset(content: @Composable () -> Unit) {
     val sink = LocalBackdropSink.current
     SideEffect { sink(null) }
-    Box(Modifier.fillMaxSize().padding(top = 56.dp)) { content() }
+    Box(Modifier.fillMaxSize().padding(top = 24.dp)) { content() }
 }
 
-@OptIn(ExperimentalComposeUiApi::class)
+/**
+ * The menu: a slim rail of icons on the left that widens to show names when you move onto it,
+ * dimming the screen behind. OK opens a section; Right goes back to the screen.
+ */
 @Composable
-private fun TopNav(
-    tabs: List<Tab>,
+private fun Rail(
+    items: List<NavItem>,
     selected: Int,
     requesters: List<FocusRequester>,
     onSelect: (Int) -> Unit,
     onFocusChanged: (Boolean) -> Unit,
     dotOn: Int,
 ) {
-    GlassPanel(
-        Modifier
-            .onFocusChanged { onFocusChanged(it.hasFocus) }
-            // Entering the bar always lands on the current tab.
-            .focusProperties { enter = { requesters[selected] } }
-            .focusGroup(),
-        shape = RoundedCornerShape(999.dp),
-        tint = Color(0x66141418),
-    ) {
-        Row(Modifier.padding(5.dp), horizontalArrangement = Arrangement.spacedBy(2.dp),
-            verticalAlignment = Alignment.CenterVertically) {
-            tabs.forEachIndexed { i, tab ->
-                FocusBox(
-                    onClick = { onSelect(i) },
-                    shape = RoundedCornerShape(999.dp),
-                    focusedScale = 1.04f,
-                    borderWidth = 0.dp,
-                    focusRequester = requesters[i],
-                ) { f ->
-                    Box {
-                        Row(
-                            Modifier
-                                .background(
-                                    when {
-                                        f -> HColors.Text
-                                        i == selected -> Color.White.copy(alpha = 0.16f)
-                                        else -> Color.Transparent
-                                    },
-                                )
-                                .padding(horizontal = if (tab.icon != null) 11.dp else 15.dp, vertical = 7.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            val fg = when {
-                                f -> Color(0xFF0A0A0B)
-                                i == selected -> HColors.Text
-                                else -> HColors.TextDim
-                            }
-                            if (tab.icon != null) {
-                                Icon(tab.icon, contentDescription = tab.label, tint = fg, modifier = Modifier.size(17.dp))
-                            } else {
-                                Text(tab.label, color = fg, fontSize = 14.sp,
-                                    fontWeight = if (f || i == selected) FontWeight.Bold else FontWeight.SemiBold, maxLines = 1)
-                            }
-                        }
-                        if (i == dotOn) {
-                            Box(
-                                Modifier
-                                    .align(Alignment.TopEnd)
-                                    .padding(3.dp)
-                                    .size(7.dp)
-                                    .clip(CircleShape)
-                                    .background(HColors.Warn),
-                            )
-                        }
-                    }
+    var expanded by remember { mutableStateOf(false) }
+    val width by animateDpAsState(if (expanded) RailExpanded else RailCollapsed, tween(260), label = "rail")
+    val scrim by animateFloatAsState(if (expanded) 1f else 0f, tween(260), label = "scrim")
+    Box(Modifier.fillMaxHeight()) {
+        if (scrim > 0f) {
+            Box(
+                Modifier
+                    .fillMaxHeight()
+                    .width(720.dp)
+                    .graphicsLayer { alpha = scrim }
+                    .background(Brush.horizontalGradient(
+                        0f to HColors.Bg.copy(alpha = 0.92f), 0.45f to HColors.Bg.copy(alpha = 0.6f), 1f to Color.Transparent)),
+            )
+        }
+        Column(
+            Modifier
+                .fillMaxHeight()
+                .width(width)
+                .background(Brush.horizontalGradient(listOf(Color(0xF0050506), Color(0xD9050506))))
+                .onFocusChanged {
+                    expanded = it.hasFocus
+                    onFocusChanged(it.hasFocus)
                 }
+                .focusProperties { enter = { requesters[selected] } }
+                .focusGroup()
+                .padding(horizontal = 12.dp, vertical = 22.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            Row(Modifier.height(40.dp).padding(start = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+                Box(
+                    Modifier.size(32.dp).clip(RoundedCornerShape(9.dp))
+                        .background(Brush.linearGradient(listOf(Color(0xFF5AC8FA), Color(0xFF0A84FF)))),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text("H", color = Color.White, fontSize = 17.sp, fontWeight = FontWeight.ExtraBold)
+                }
+                if (width > 140.dp) {
+                    Spacer(Modifier.width(12.dp))
+                    Text("Harbour", fontSize = 18.sp, fontWeight = FontWeight.ExtraBold, maxLines = 1,
+                        modifier = Modifier.graphicsLayer { alpha = scrim })
+                }
+            }
+            Spacer(Modifier.height(14.dp))
+            items.forEachIndexed { i, item ->
+                if (i == items.lastIndex) Spacer(Modifier.weight(1f))
+                RailItem(item, i == selected, width > 140.dp, scrim, i == dotOn, requesters[i]) { onSelect(i) }
+            }
+        }
+    }
+}
+
+@Composable
+private fun RailItem(
+    item: NavItem,
+    selected: Boolean,
+    showLabel: Boolean,
+    labelAlpha: Float,
+    dot: Boolean,
+    requester: FocusRequester,
+    onClick: () -> Unit,
+) {
+    FocusBox(
+        onClick = onClick,
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(12.dp),
+        focusedScale = 1.03f,
+        borderWidth = 0.dp,
+        focusRequester = requester,
+    ) { f ->
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .height(44.dp)
+                .background(
+                    when {
+                        f -> HColors.Text
+                        selected -> Color.White.copy(alpha = 0.13f)
+                        else -> Color.Transparent
+                    },
+                )
+                .padding(start = 15.dp, end = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            val fg = when {
+                f -> Color(0xFF0A0A0B)
+                selected -> HColors.Text
+                else -> HColors.TextDim
+            }
+            Box {
+                Icon(item.icon, contentDescription = item.label, tint = fg, modifier = Modifier.size(22.dp))
+                if (dot) {
+                    Box(Modifier.align(Alignment.TopEnd).size(7.dp).clip(CircleShape).background(HColors.Warn))
+                }
+            }
+            if (showLabel) {
+                Spacer(Modifier.width(16.dp))
+                Text(item.label, color = fg, fontSize = 16.sp, maxLines = 1,
+                    fontWeight = if (f || selected) FontWeight.Bold else FontWeight.SemiBold,
+                    modifier = Modifier.graphicsLayer { alpha = labelAlpha })
             }
         }
     }
