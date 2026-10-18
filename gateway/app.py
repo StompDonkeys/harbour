@@ -9,6 +9,7 @@ download queues).
 
 Config: /config/config.json (see config.example.json). Override with HARBOUR_CONFIG.
 """
+import hashlib
 import hmac
 import xml.etree.ElementTree as ET
 import json
@@ -2656,6 +2657,19 @@ class NzbGet:
                   "paused": bool(st.get("DownloadPaused")), "count": len(items), "seeding": 0}
         return client, items
 
+    def categories(self):
+        conf = self.rpc("config") or []
+        return [o.get("Value") for o in conf
+                if re.fullmatch(r"Category\d+\.Name", o.get("Name") or "") and o.get("Value")]
+
+    def add_nzb(self, url, title, category=""):
+        name = re.sub(r"[\\/:*?\"<>|]", "_", title)[:200] + ".nzb"
+        # append(NZBFilename, Content-or-URL, Category, Priority, AddToTop, AddPaused, DupeKey, DupeScore, DupeMode, PPParameters)
+        nid = self.rpc("append", name, url, category, 0, False, False, "", 0, "SCORE", [])
+        if not nid or (isinstance(nid, int) and nid <= 0):
+            raise ApiError(f"{self.name} couldn't add that NZB")
+        return nid
+
     def act(self, item_id, act):
         if item_id is None:
             if act not in ("pause", "resume"):
@@ -2754,6 +2768,30 @@ class QBittorrent:
                   "paused": bool(items) and all(i["paused"] for i in items),
                   "count": len(items), "seeding": seeding}
         return client, items
+
+    def categories(self):
+        return sorted((self.req("GET", "/torrents/categories").json() or {}).keys())
+
+    def add_torrent(self, magnet, url, category=None):
+        data = {"category": category} if category else {}
+        if magnet:
+            self.req("POST", "/torrents/add", data=dict(data, urls=magnet))
+            return
+        if not url:
+            raise ApiError("That result has no download link")
+        # Fetch it here: indexer links often redirect to a magnet, which qBittorrent won't follow.
+        r = requests.get(url, allow_redirects=False, timeout=30)
+        loc = r.headers.get("Location") or ""
+        while r.is_redirect and loc and not loc.startswith("magnet:"):
+            r = requests.get(loc, allow_redirects=False, timeout=30)
+            loc = r.headers.get("Location") or ""
+        if loc.startswith("magnet:"):
+            self.req("POST", "/torrents/add", data=dict(data, urls=loc))
+        elif r.status_code < 400 and r.content:
+            self.req("POST", "/torrents/add", data=data, files={"torrents": ("release.torrent", r.content,
+                                                                             "application/x-bittorrent")})
+        else:
+            raise ApiError(f"Couldn't fetch the torrent (HTTP {r.status_code})", 502)
 
     def act(self, item_id, act):
         hashes = item_id or "all"
@@ -2903,6 +2941,226 @@ def yt_update_loop():
         except Exception as e:
             log.warning("yt-dlp update failed: %s", e)
         time.sleep(86400)
+
+
+
+# ---------------------------------------------------------------- Indexer search
+#
+# Search your indexers directly — Prowlarr (torrent + usenet) and/or Newznab indexers listed in
+# the config — and send a result straight to qBittorrent or NZBGet. Download links (which carry
+# indexer API keys) never leave the gateway: the TV only sees an id.
+
+IDX_CATS = {"movies": "2000", "tv": "5000"}
+_IDX_RESULTS = {}   # id -> (time, source info for grabbing)
+_IDX_LOCK = threading.Lock()
+
+
+def _age(dt):
+    d = parse_dt(dt) if isinstance(dt, str) else None
+    if not d:
+        return None, None
+    if d.tzinfo is None:
+        d = d.replace(tzinfo=timezone.utc)
+    days = max(0, (datetime.now(timezone.utc) - d).total_seconds() / 86400)
+    if days < 1:
+        return f"{int(days * 24) or 1}h", days
+    if days < 60:
+        return f"{int(days)}d", days
+    if days < 730:
+        return f"{int(days / 30)}mo", days
+    return f"{int(days / 365)}y", days
+
+
+def _cat_label(cats):
+    ids = [int(c) for c in cats if str(c).isdigit()]
+    for i in ids:
+        if 2000 <= i < 3000:
+            return "Movies"
+        if 5000 <= i < 6000:
+            return "TV"
+    for i in ids:
+        if 3000 <= i < 4000:
+            return "Audio"
+        if 7000 <= i < 8000:
+            return "Books"
+        if 1000 <= i < 2000:
+            return "Console"
+        if 4000 <= i < 5000:
+            return "PC"
+    return None
+
+
+class Prowlarr:
+    def __init__(self, conf):
+        self.name = conf.get("name", "Prowlarr")
+        self.url = conf["url"].rstrip("/")
+        self.key = conf["api_key"]
+
+    def search(self, q, kind):
+        params = [("query", q), ("type", "search"), ("limit", "100")]
+        if kind in IDX_CATS:
+            params.append(("categories", IDX_CATS[kind]))
+        r = requests.get(f"{self.url}/api/v1/search", params=params, headers={"X-Api-Key": self.key}, timeout=90)
+        if r.status_code >= 400:
+            raise ApiError(f"{self.name}: HTTP {r.status_code}", 502)
+        out = []
+        for x in r.json() or []:
+            proto = "torrent" if (x.get("protocol") or "").lower() == "torrent" else "usenet"
+            age, days = _age(x.get("publishDate"))
+            out.append(({
+                "title": x.get("title") or "?", "indexer": x.get("indexer") or self.name, "protocol": proto,
+                "size": int(x.get("size") or 0), "age": age, "ageDays": days,
+                "seeders": x.get("seeders"), "leechers": x.get("leechers"), "grabs": x.get("grabs"),
+                "category": _cat_label([c.get("id") for c in x.get("categories") or [] if isinstance(c, dict)]),
+            }, {"via": "prowlarr", "src": self, "guid": x.get("guid"), "indexerId": x.get("indexerId"),
+                "magnet": x.get("magnetUrl"), "url": x.get("downloadUrl"), "title": x.get("title") or "release"}))
+        return out
+
+    def grab(self, info):
+        r = requests.post(f"{self.url}/api/v1/search", json={"guid": info["guid"], "indexerId": info["indexerId"]},
+                          headers={"X-Api-Key": self.key}, timeout=60)
+        if r.status_code >= 400:
+            try:
+                msg = (r.json() or {}).get("message")
+            except ValueError:
+                msg = None
+            raise ApiError(f"{self.name}: {msg or f'HTTP {r.status_code}'}", 502)
+
+
+class Newznab:
+    """A usenet indexer straight from its Newznab API (for indexers that aren't in Prowlarr)."""
+    NS = "{http://www.newznab.com/DTD/2010/feeds/attributes/}"
+
+    def __init__(self, conf):
+        self.name = conf.get("name", "Indexer")
+        self.url = conf["url"].rstrip("/")
+        self.api_path = conf.get("api_path", "/api")
+        self.key = conf["api_key"]
+
+    def search(self, q, kind):
+        params = {"t": "search", "q": q, "apikey": self.key, "limit": "100", "extended": "1"}
+        if kind in IDX_CATS:
+            params["cat"] = IDX_CATS[kind]
+        r = requests.get(f"{self.url}{self.api_path}", params=params, timeout=60)
+        if r.status_code >= 400:
+            raise ApiError(f"{self.name}: HTTP {r.status_code}", 502)
+        try:
+            root = ET.fromstring(r.content)
+        except ET.ParseError:
+            raise ApiError(f"{self.name}: unreadable answer", 502)
+        err = root if root.tag == "error" else None
+        if err is not None:
+            raise ApiError(f"{self.name}: {err.get('description') or 'error'}", 502)
+        out = []
+        for it in root.iter("item"):
+            attrs = {a.get("name"): a.get("value") for a in it.iter(f"{self.NS}attr")}
+            enc = it.find("enclosure")
+            size = attrs.get("size") or (enc.get("length") if enc is not None else 0)
+            link = (enc.get("url") if enc is not None else None) or it.findtext("link")
+            age, days = _age(it.findtext("pubDate") and _rfc822(it.findtext("pubDate")))
+            cats = [a.get("value") for a in it.iter(f"{self.NS}attr") if a.get("name") == "category"]
+            out.append(({
+                "title": it.findtext("title") or "?", "indexer": self.name, "protocol": "usenet",
+                "size": int(size or 0), "age": age, "ageDays": days,
+                "grabs": int(attrs["grabs"]) if (attrs.get("grabs") or "").isdigit() else None,
+                "category": _cat_label(cats),
+            }, {"via": "newznab", "src": self, "url": link, "title": it.findtext("title") or "release"}))
+        return out
+
+
+def _rfc822(s):
+    from email.utils import parsedate_to_datetime
+    try:
+        return parsedate_to_datetime(s).astimezone(timezone.utc).isoformat()
+    except (TypeError, ValueError):
+        return None
+
+
+def indexer_sources():
+    out = []
+    p = CFG.get("prowlarr")
+    for c in (p if isinstance(p, list) else [p] if p else []):
+        out.append(Prowlarr(c))
+    for c in CFG.get("newznab") or []:
+        out.append(Newznab(c))
+    return out
+
+
+def indexer_search(q, kind="all", protocol="all"):
+    q = (q or "").strip()
+    if not q:
+        return {"results": [], "errors": []}
+    srcs = indexer_sources()
+    if not srcs:
+        raise ApiError("No indexers set up — add \"prowlarr\" (or \"newznab\") to the gateway config", 404)
+    futs = [(s, POOL.submit(s.search, q, kind)) for s in srcs]
+    results, errors = [], []
+    now = time.time()
+    with _IDX_LOCK:
+        for k in [k for k, v in _IDX_RESULTS.items() if now - v[0] > 3600]:
+            _IDX_RESULTS.pop(k, None)
+    for s, f in futs:
+        try:
+            for pub, info in f.result():
+                if protocol != "all" and pub["protocol"] != protocol:
+                    continue
+                rid = hashlib.sha1(f"{s.name}|{pub['title']}|{info.get('guid') or info.get('url')}".encode()).hexdigest()[:16]
+                with _IDX_LOCK:
+                    _IDX_RESULTS[rid] = (now, dict(info, protocol=pub["protocol"]))
+                results.append(clean(dict(pub, id=rid)))
+        except Exception as e:
+            errors.append(e.message if isinstance(e, ApiError) else f"{s.name}: {e}")
+    seen, uniq = set(), []
+    for r in results:
+        k = (r["title"].lower(), r["size"], r["protocol"])
+        if k not in seen:
+            seen.add(k)
+            uniq.append(r)
+    uniq.sort(key=lambda r: (-(r.get("seeders") or 0) if r["protocol"] == "torrent" else -(r.get("grabs") or 0),
+                             r.get("ageDays") or 9e9))
+    return {"results": uniq, "errors": errors}
+
+
+def grab_targets():
+    """Where a result can go: each download client (by its categories), plus Prowlarr's own clients."""
+    out = {"torrent": [], "usenet": []}
+    for c in CLIENTS.values():
+        proto = "torrent" if c.kind == "qbittorrent" else "usenet"
+        cats = safe(c.categories, f"{c.name} categories", []) or []
+        out[proto].append({"label": f"{c.name} · no category", "value": f"{c.id}|"})
+        out[proto] += [{"label": f"{c.name} · {cat}", "value": f"{c.id}|{cat}"} for cat in cats]
+    if CFG.get("prowlarr"):
+        for proto in out:
+            out[proto].append({"label": "Let Prowlarr send it (its own download client)", "value": "prowlarr|"})
+    return out
+
+
+def indexer_grab(rid, target):
+    with _IDX_LOCK:
+        hit = _IDX_RESULTS.get(rid)
+    if not hit:
+        raise ApiError("That search result has expired — search again", 410)
+    info = hit[1]
+    cid, _, cat = (target or "").partition("|")
+    if cid == "prowlarr":
+        if info["via"] != "prowlarr":
+            raise ApiError("Prowlarr can only send its own results")
+        info["src"].grab(info)
+        return {"message": "Sent via Prowlarr ✓"}
+    c = CLIENTS.get(cid)
+    if not c:
+        raise ApiError("Unknown download client", 404)
+    if info["protocol"] == "torrent":
+        if c.kind != "qbittorrent":
+            raise ApiError("Torrents need qBittorrent")
+        c.add_torrent(info.get("magnet"), info.get("url"), cat or None)
+    else:
+        if c.kind != "nzbget":
+            raise ApiError("Usenet results need NZBGet")
+        if not info.get("url"):
+            raise ApiError("That result has no NZB link")
+        c.add_nzb(info["url"], info["title"], cat or "")
+    return {"message": f"Sent to {c.name} ✓"}
 
 
 # ---------------------------------------------------------------- wiring
@@ -3189,6 +3447,7 @@ def config():
                    libraries=[l.info() for l in LIBS.values()],
                    dashboard=HUB is not None,
                    trailers=trailers_available(),
+                   indexers=bool(CFG.get("prowlarr") or CFG.get("newznab")),
                    repo=CFG.get("github_repo") or DEFAULT_REPO)
 
 
@@ -3467,6 +3726,23 @@ def save_recording():
             pass
     log.info("saved screen recording %s (%s)", path, fmt_size(size))
     return jsonify(path=path, size=size)
+
+
+@app.get("/api/indexers/search")
+def indexers_search():
+    a = request.args
+    return jsonify(indexer_search(a.get("q", ""), a.get("kind", "all"), a.get("protocol", "all")))
+
+
+@app.get("/api/indexers/targets")
+def indexers_targets():
+    return jsonify(grab_targets())
+
+
+@app.post("/api/indexers/grab")
+def indexers_grab():
+    b = request.get_json(silent=True) or {}
+    return jsonify(indexer_grab(b.get("id"), b.get("target")))
 
 
 @app.get("/api/calendar")

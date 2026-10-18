@@ -46,6 +46,7 @@ data class GatewayConfig(
     val libraries: List<ServiceInfo> = emptyList(),
     val dashboard: Boolean = false,
     val trailers: Boolean = false,
+    val indexers: Boolean = false,
     val repo: String = "StompDonkeys/harbour",
     val version: String = "",
 )
@@ -592,3 +593,36 @@ data class CalendarData(
 
 suspend fun Gateway.calendar(start: String, end: String, unmonitored: Boolean): CalendarData =
     get("/api/calendar?start=$start&end=$end&unmonitored=${if (unmonitored) 1 else 0}")
+
+// ------------------------------------------------------------------ indexer search
+
+@Serializable
+data class IdxResult(
+    val id: String,
+    val title: String,
+    val indexer: String = "",
+    val protocol: String = "usenet",   // usenet | torrent
+    val size: Long = 0,
+    val age: String? = null,
+    val seeders: Int? = null,
+    val leechers: Int? = null,
+    val grabs: Int? = null,
+    val category: String? = null,
+)
+
+@Serializable
+data class IdxSearch(val results: List<IdxResult> = emptyList(), val errors: List<String> = emptyList())
+
+@Serializable
+data class IdxTargets(val torrent: List<ChoiceOption> = emptyList(), val usenet: List<ChoiceOption> = emptyList())
+
+suspend fun Gateway.indexerSearch(q: String, kind: String, protocol: String): IdxSearch =
+    get("/api/indexers/search?q=${Gateway.enc(q)}&kind=$kind&protocol=$protocol")
+
+suspend fun Gateway.indexerTargets(): IdxTargets = get("/api/indexers/targets")
+
+suspend fun Gateway.indexerGrab(id: String, target: String): ActionResult =
+    post("/api/indexers/grab", buildJsonObject {
+        put("id", id)
+        put("target", target)
+    })

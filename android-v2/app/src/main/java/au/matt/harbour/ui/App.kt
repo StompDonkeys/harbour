@@ -88,6 +88,7 @@ sealed interface Screen {
     data class CalendarDay(val date: String) : Screen
     data class Season(val svc: ServiceInfo, val showId: String, val number: Int, val focusEpisode: Int? = null) : Screen
     data class Trailer(val key: String, val title: String) : Screen
+    data object Indexers : Screen
     data object Downloads : Screen
     data object Files : Screen
     data object Settings : Screen
@@ -240,6 +241,7 @@ private fun MainShell(config: GatewayConfig, settings: @Composable () -> Unit, u
                 config.services.forEach { add(NavItem(it.name, Screen.Library(it), iconFor(it))) }
             }
             if (config.calendar) add(NavItem("Calendar", Screen.Calendar, HIcons.Calendar))
+            if (config.indexers) add(NavItem("Indexers", Screen.Indexers, HIcons.ManageSearch))
             if (config.downloads) add(NavItem("Downloads", Screen.Downloads, HIcons.Download))
             if (config.files) add(NavItem("Files", Screen.Files, HIcons.Folder))
             add(NavItem("Settings", Screen.Settings, Icons.Filled.Settings))
@@ -407,6 +409,7 @@ private fun ScreenContent(
         )
         Screen.Calendar -> CalendarScreen(onOpen = { e -> open(null, calTarget(e)) })
         is Screen.CalendarDay -> CalendarScreen(onOpen = { e -> open(null, calTarget(e)) }, initialDate = screen.date)
+        Screen.Indexers -> TopInset { IndexerScreen() }
         Screen.Downloads -> TopInset { DownloadsScreen() }
         Screen.Files -> TopInset { FilesScreen() }
         Screen.Settings -> TopInset { settings() }

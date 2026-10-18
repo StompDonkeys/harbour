@@ -1007,3 +1007,64 @@ def test_recording_saved_to_nas(client):
     assert b'name="path"\r\n\r\n/video/Harbour recordings\r\n' in b and b'filename="Demo 1.mp4"' in b
     assert video in b and got["ct"].startswith("multipart/form-data; boundary=")
     assert b.index(b'name="create_parents"') < b.index(b'name="file"')
+
+
+NZB_XML = b"""<?xml version="1.0"?><rss xmlns:newznab="http://www.newznab.com/DTD/2010/feeds/attributes/"><channel>
+<item><title>Dune.Part.Two.2024.2160p.WEB-DL</title><link>https://idx.example/getnzb/abc?apikey=K</link>
+<pubDate>Mon, 01 Apr 2024 10:00:00 +0000</pubDate><enclosure url="https://idx.example/getnzb/abc?apikey=K" length="20000000000"/>
+<newznab:attr name="category" value="2045"/><newznab:attr name="grabs" value="321"/></item>
+</channel></rss>"""
+
+
+@responses.activate
+def test_indexer_search_and_grab(client, monkeypatch):
+    monkeypatch.setitem(gw.CFG, "prowlarr", {"url": "http://nas:9696", "api_key": "PK"})
+    monkeypatch.setitem(gw.CFG, "newznab", [{"name": "NZBgeek", "url": "https://idx.example", "api_key": "K"}])
+    qb = gw.QBittorrent({"id": "qb", "url": "http://nas:8080", "api_key": "QK"})
+    nz = gw.NzbGet({"id": "nz", "url": "http://nas:6789"})
+    monkeypatch.setattr(gw, "CLIENTS", {"qb": qb, "nz": nz})
+    responses.get("http://nas:9696/api/v1/search", json=[
+        {"guid": "g1", "indexerId": 4, "indexer": "1337x", "title": "Dune Part Two 2024 1080p", "protocol": "torrent",
+         "size": 9000000000, "seeders": 900, "leechers": 20, "publishDate": iso(now - timedelta(days=3)),
+         "downloadUrl": "http://nas:9696/4/download?apikey=PK&link=x", "categories": [{"id": 2040}]},
+        {"guid": "g2", "indexerId": 5, "indexer": "TPB", "title": "Dune Part Two 2024 720p", "protocol": "torrent",
+         "size": 3000000000, "seeders": 50, "magnetUrl": "magnet:?xt=urn:btih:AAA", "categories": [{"id": 2030}]}])
+    responses.get("https://idx.example/api", body=NZB_XML)
+    r = client.get("/api/indexers/search?q=dune%20part%20two&kind=movies", headers=H)
+    assert r.status_code == 200, r.data
+    res = r.get_json()["results"]
+    assert [x["indexer"] for x in res] == ["1337x", "TPB", "NZBgeek"] or res[0]["indexer"] == "1337x"
+    tor = next(x for x in res if x["indexer"] == "1337x")
+    nzb = next(x for x in res if x["indexer"] == "NZBgeek")
+    assert tor["protocol"] == "torrent" and tor["category"] == "Movies" and tor["age"] == "3d"
+    assert nzb["protocol"] == "usenet" and nzb["grabs"] == 321 and nzb["size"] == 20000000000
+    assert "apikey" not in json.dumps(res) and "url" not in tor
+    assert "categories=2000" in [c.request.url for c in responses.calls if "9696" in c.request.url][0]
+
+    responses.get("http://nas:8080/api/v2/torrents/categories", json={"radarr": {}, "tv-sonarr": {}})
+    responses.post("http://nas:6789/jsonrpc", json={"result": [{"Name": "Category1.Name", "Value": "movies"},
+                                                               {"Name": "Other", "Value": "x"}]})
+    t = client.get("/api/indexers/targets", headers=H).get_json()
+    assert [o["value"] for o in t["torrent"]] == ["qb|", "qb|radarr", "qb|tv-sonarr", "prowlarr|"]
+    assert [o["value"] for o in t["usenet"]][:2] == ["nz|", "nz|movies"]
+
+    # torrent: the download link redirects to a magnet → magnet goes to qBittorrent
+    responses.get("http://nas:9696/4/download", status=301, headers={"Location": "magnet:?xt=urn:btih:BBB"})
+    responses.post("http://nas:8080/api/v2/torrents/add", body="Ok.")
+    g = client.post("/api/indexers/grab", headers=H, json={"id": tor["id"], "target": "qb|radarr"}).get_json()
+    assert g["message"] == "Sent to qBittorrent ✓"
+    body = responses.calls[-1].request.body
+    assert "magnet%3A%3Fxt%3Durn%3Abtih%3ABBB" in body and "category=radarr" in body
+
+    responses.replace(responses.POST, "http://nas:6789/jsonrpc", json={"result": 77})
+    g = client.post("/api/indexers/grab", headers=H, json={"id": nzb["id"], "target": "nz|movies"}).get_json()
+    assert g["message"] == "Sent to NZBGet ✓"
+    sent = json.loads(responses.calls[-1].request.body)
+    assert sent["method"] == "append" and sent["params"][1].startswith("https://idx.example/getnzb") \
+        and sent["params"][2] == "movies"
+
+    responses.post("http://nas:9696/api/v1/search", json={})
+    g = client.post("/api/indexers/grab", headers=H, json={"id": tor["id"], "target": "prowlarr|"}).get_json()
+    assert "Prowlarr" in g["message"] and json.loads(responses.calls[-1].request.body) == {"guid": "g1", "indexerId": 4}
+    assert client.post("/api/indexers/grab", headers=H, json={"id": "nope", "target": "qb|"}).status_code == 410
+    assert client.post("/api/indexers/grab", headers=H, json={"id": nzb["id"], "target": "qb|"}).status_code == 400
