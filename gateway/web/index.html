@@ -1330,7 +1330,7 @@ function showLogin(status) {
   const setup = status ? status.setup_needed : false;
   const name = status?.name || "Harbour";
   const err = h("div", { class: "err" });
-  const token = h("input", { type: "password", inputmode: "numeric", autocomplete: "off", placeholder: "Code from your TV app" });
+  const token = h("input", { type: "password", autocomplete: "off", autocapitalize: "off", autocorrect: "off", spellcheck: "false", placeholder: "Code from your TV app" });
   const pw = h("input", { type: "password", autocomplete: setup ? "new-password" : "current-password", placeholder: setup ? "At least 8 characters" : "Password" });
   const pw2 = h("input", { type: "password", autocomplete: "new-password", placeholder: "Repeat it" });
   const btn = h("button", { class: "btn primary", onclick: () => go() }, setup ? "Set password" : "Sign in");
