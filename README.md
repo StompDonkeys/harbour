@@ -85,6 +85,8 @@ The gateway also serves an iPhone app at `/m/` — same features as the TV app (
 
    Then open `https://harbour.plexstation.synology.me` on the phone, sign in, and add *that* one to the Home Screen (delete the home-network one) — it works at home and away.
 
+**Bigger screens and the iPhone Duo.** On a normal phone, or the Duo's cover screen, every page fills the screen. Open the Duo (or turn any phone sideways, or use an iPad) and Library, Discover, Calendar, Files and Settings go side by side: the list on the left half, what you opened on the right half, split at the fold. Folding and unfolding keeps you where you were. If Safari reports the hinge position (the Viewport Segments API), the split follows it exactly.
+
 **Security notes.** The password is stored hashed in `config.json` (`"web"` section). Sign-ins last 180 days per phone; *Settings → Change password* signs out every other phone. Five wrong passwords in 15 minutes locks sign-in for 15 minutes. API keys and passwords are never sent back to the phone — Settings only shows whether each one is set.
 
 ## 2. Build the APK with GitHub Actions
