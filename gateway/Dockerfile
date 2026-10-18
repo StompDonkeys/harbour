@@ -6,7 +6,7 @@ COPY --from=denoland/deno:bin /deno /usr/local/bin/deno
 WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
-COPY app.py web_access.py .
+COPY app.py web_access.py ./
 COPY web/ web/
 
 # HOME/caches point at /tmp because the container runs as your limited NAS user.
