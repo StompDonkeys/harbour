@@ -77,7 +77,7 @@ img { display: block; }
 #tabbar { position: fixed; left: 0; right: 0; bottom: 0; height: var(--tabbar); padding-bottom: var(--bottom);
   display: flex; background: var(--bar); -webkit-backdrop-filter: saturate(180%) blur(20px); backdrop-filter: saturate(180%) blur(20px);
   box-shadow: 0 -.5px 0 var(--sep); z-index: 20; }
-#tabbar button { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px;
+#tabbar button { flex: 1; min-width: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px;
   color: var(--label-2); font-size: 10px; font-weight: 500; letter-spacing: .1px; padding-top: 2px; }
 #tabbar button svg { width: 26px; height: 26px; }
 #tabbar button.on { color: var(--tint); }
@@ -196,7 +196,7 @@ button.cell:active, .cell.tap:active { background: var(--cell-2); }
 .overview.clamp { display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; }
 .more-link { padding: 2px 16px 0; color: var(--tint); font-size: 15px; }
 .btns { display: flex; gap: 10px; padding: 18px 16px 24px; }
-.btn { flex: 1; height: 50px; border-radius: 12px; font-size: 17px; font-weight: 600; background: var(--fill); color: var(--tint);
+.btn { flex: 1; height: 50px; border-radius: 12px; font-size: clamp(14px, 4.3vw, 17px); white-space: nowrap; font-weight: 600; background: var(--fill); color: var(--tint);
   display: inline-flex; align-items: center; justify-content: center; gap: 6px; padding: 0 14px; }
 .btn.primary { background: var(--tint); color: #fff; }
 .btn.danger { color: var(--red); }
@@ -214,6 +214,27 @@ button.cell:active, .cell.tap:active { background: var(--cell-2); }
 .dot { width: 9px; height: 9px; border-radius: 50%; flex: none; background: var(--label-3); }
 .dot.on { background: var(--green); }
 .dot.miss { background: var(--orange); }
+
+/* calendar */
+.weekstrip { margin: 0 8px 12px; touch-action: pan-y; }
+.wk-head { display: flex; align-items: center; justify-content: space-between; }
+.wk-head .navbtn svg { width: 11px; height: 18px; }
+.wk-month { font-weight: 600; font-size: 17px; }
+.wk-days { display: grid; grid-template-columns: repeat(7, 1fr); gap: 2px; margin-top: 2px; }
+.wk-day { display: flex; flex-direction: column; align-items: center; gap: 3px; padding: 4px 0 2px; }
+.wk-day .dow { font-size: 11px; font-weight: 600; color: var(--label-2); text-transform: uppercase; }
+.wk-day .num { width: 34px; height: 34px; border-radius: 50%; display: grid; place-items: center; font-size: 19px; font-weight: 500; }
+.wk-day.today .num { color: var(--red); font-weight: 600; }
+.wk-day.sel .num { background: var(--label); color: var(--bg-plain); }
+.wk-day.sel.today .num { background: var(--red); color: #fff; }
+.wk-day .dots { height: 6px; display: flex; }
+.wk-day .dots i { width: 5px; height: 5px; border-radius: 50%; background: var(--label-3); }
+.cal-day.today { color: var(--red); }
+.chip.purple { color: #af52de; }
+.modal.trailer { background: #000; }
+.modal.trailer .navbar { background: rgba(28,28,30,.9); color: #fff; box-shadow: none; }
+.modal.trailer .section-foot { color: rgba(235,235,245,.6); }
+.modal.trailer .group, .modal.trailer .cell { background: #1c1c1e; }
 
 /* releases */
 .rel .t { font-size: 14px; font-weight: 500; overflow-wrap: anywhere; line-height: 1.3; }
@@ -344,6 +365,7 @@ const ICON = {
   tabLibrary: '<svg viewBox="0 0 28 28"><rect x="3.5" y="5.5" width="21" height="17" rx="3" fill="none" stroke="currentColor" stroke-width="2"/><path d="M3.5 10h21M3.5 18h21M8.5 5.5v4.5M8.5 18v4.5M14 5.5v4.5M14 18v4.5M19.5 5.5v4.5M19.5 18v4.5" stroke="currentColor" stroke-width="2"/></svg>',
   tabDiscover: '<svg viewBox="0 0 28 28"><circle cx="14" cy="14" r="10.5" fill="none" stroke="currentColor" stroke-width="2"/><path d="m18.5 9.5-2.6 6.4-6.4 2.6 2.6-6.4z" fill="currentColor"/></svg>',
   tabDownloads: '<svg viewBox="0 0 28 28"><circle cx="14" cy="14" r="10.5" fill="none" stroke="currentColor" stroke-width="2"/><path d="M14 8.5v10M9.8 14.5l4.2 4.2 4.2-4.2" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+  tabCalendar: '<svg viewBox="0 0 28 28"><rect x="4" y="5.5" width="20" height="18.5" rx="3.5" fill="none" stroke="currentColor" stroke-width="2"/><path d="M4 11h20M9.5 3.5v4M18.5 3.5v4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><circle cx="10" cy="16" r="1.4" fill="currentColor"/><circle cx="14" cy="16" r="1.4" fill="currentColor"/><circle cx="18" cy="16" r="1.4" fill="currentColor"/><circle cx="10" cy="20" r="1.4" fill="currentColor"/><circle cx="14" cy="20" r="1.4" fill="currentColor"/></svg>',
   tabFiles: '<svg viewBox="0 0 28 28"><path d="M3.5 8.5a2 2 0 0 1 2-2h5.6l2.4 2.6h9a2 2 0 0 1 2 2V21a2 2 0 0 1-2 2h-17a2 2 0 0 1-2-2z" fill="none" stroke="currentColor" stroke-width="2"/></svg>',
   tabSettings: '<svg viewBox="0 0 28 28"><path d="M14 3.8l2 .3.6 2.5 1.6.7 2.2-1.3 1.6 1.2 1.2 1.6-1.3 2.2.7 1.6 2.5.6.3 2-.3 2-2.5.6-.7 1.6 1.3 2.2-1.2 1.6-1.6 1.2-2.2-1.3-1.6.7-.6 2.5-2 .3-2-.3-.6-2.5-1.6-.7-2.2 1.3-1.6-1.2-1.2-1.6 1.3-2.2-.7-1.6-2.5-.6-.3-2 .3-2 2.5-.6.7-1.6-1.3-2.2 1.2-1.6 1.6-1.2 2.2 1.3 1.6-.7.6-2.5z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><circle cx="14" cy="14" r="3.6" fill="none" stroke="currentColor" stroke-width="1.9"/></svg>',
   folder: '<svg viewBox="0 0 24 24"><path d="M2.5 6.5A1.5 1.5 0 0 1 4 5h5.2l2 2.2H20a1.5 1.5 0 0 1 1.5 1.5V18A1.5 1.5 0 0 1 20 19.5H4A1.5 1.5 0 0 1 2.5 18z" fill="currentColor"/></svg>',
@@ -467,6 +489,7 @@ async function promptBox(title, message, value, okLabel = "OK") {
 const TABS = [
   { id: "library", label: "Library", icon: "tabLibrary", root: () => LibraryScreen(), show: () => arrServices().length > 0 },
   { id: "discover", label: "Discover", icon: "tabDiscover", root: () => DiscoverScreen(), show: () => !!seerrService() },
+  { id: "calendar", label: "Calendar", icon: "tabCalendar", root: () => CalendarScreen(), show: () => !!S.config?.calendar },
   { id: "downloads", label: "Downloads", icon: "tabDownloads", root: () => DownloadsScreen(), show: () => !!S.config?.downloads },
   { id: "files", label: "Files", icon: "tabFiles", root: () => FilesScreen(""), show: () => !!S.config?.files },
   { id: "settings", label: "Settings", icon: "tabSettings", root: () => SettingsScreen(), show: () => true },
@@ -792,12 +815,28 @@ function DetailScreen(svc, id, preview) {
       h("h1", {}, item.title), item.subtitle && h("div", { class: "sub" }, item.subtitle),
       item.badge && h("span", { class: "chip " + (item.badgeTone || "") }, item.badge)))];
   }
+  let extraTrailer = null, lookedFor = false;
   async function load() {
     try {
       data = await get(`${svcPath(svc)}/item/${enc(id)}`);
       stale = false;
       draw();
+      findTrailer();
     } catch (e) { holder.replaceChildren(...(preview ? header(preview) : []), errorState(e, load)); }
+  }
+  /** Radarr/Sonarr pages link to a richer "Cast & more" page that has the trailer; fetch it quietly
+      so the Trailer button sits right on this page. */
+  async function findTrailer() {
+    if (lookedFor) return;
+    lookedFor = true;
+    const link = (data.actions || []).find(a => a.opens === "item" && /^hub\//.test(a.arg || ""));
+    if (!link || (data.actions || []).some(a => a.opens === "youtube" || a.opens === "trailer")) return;
+    try {
+      const rest = link.arg.split("/").slice(2).join("/");
+      const other = await get(`/api/svc/hub/hub/item/${enc(rest)}`);
+      const t = (other.actions || []).find(a => a.opens === "youtube" || a.opens === "trailer");
+      if (t && holder.isConnected) { extraTrailer = t; draw(); }
+    } catch (e) { /* no trailer — fine */ }
   }
   function draw() {
     const d = data, it = d.item || preview || {};
@@ -812,11 +851,14 @@ function DetailScreen(svc, id, preview) {
       }
     }
     const acts = d.actions || [];
-    const primary = acts.filter(a => a.style === "primary").slice(0, 2);
-    const rest = acts.filter(a => !primary.includes(a));
+    const isTrailer = a => a.opens === "youtube" || a.opens === "trailer";
+    const trailerAct = acts.find(isTrailer) || extraTrailer;
+    const primary = acts.filter(a => a.style === "primary" && !isTrailer(a)).slice(0, trailerAct ? 1 : 2);
+    const rest = acts.filter(a => !primary.includes(a) && !isTrailer(a));
     kids.push(h("div", { class: "btns" }, primary.map(a => actionButton(a, "btn primary")),
-      rest.length ? h("button", { class: "btn", style: primary.length ? "flex:0 0 50px;padding:0" : "", onclick: () => moreActions(rest, it.title) },
-        svg("more"), primary.length ? "" : "Actions") : null));
+      trailerAct && h("button", { class: "btn" + (primary.length ? "" : " primary"), onclick: () => openTrailer(trailerAct.arg, it.title) }, svg("play"), "Trailer"),
+      rest.length ? h("button", { class: "btn", style: primary.length || trailerAct ? "flex:0 0 50px;padding:0" : "", onclick: () => moreActions(rest, it.title) },
+        svg("more"), primary.length || trailerAct ? "" : "Actions") : null));
     if (d.seasons?.length) {
       kids.push(h("div", { class: "section-head" }, "Seasons"),
         h("div", { class: "section" }, h("div", { class: "group" }, d.seasons.map(s => h("button", { class: "cell", onclick: () => push(SeasonScreen(svc, id, s, it.title, reload)) },
@@ -864,7 +906,15 @@ async function runAction(svc, itemId, a, item, after, btn) {
     return;
   }
   if (a.opens === "releases") { push(ReleasesScreen(svc, itemId, a.arg, item.title, after)); return; }
-  if (a.opens) { toast("That needs the TV app"); return; }
+  if (a.opens === "youtube" || a.opens === "trailer") { openTrailer(a.arg, item.title); return; }
+  if (a.opens === "item" && a.arg) {                 // e.g. "hub/hub/movie-123": that service's page for it
+    const [kind, inst, ...rest] = a.arg.split("/");
+    const target = (S.config?.services || []).find(s => s.kind === kind && s.inst === inst) || { kind, inst, name: item.title };
+    push(DetailScreen(target, rest.join("/"), { title: item.title, poster: item.poster, backdrop: item.backdrop }));
+    return;
+  }
+  if (a.opens === "play" || a.opens === "plex") { toast("Playing from Plex is on the TV app for now"); return; }
+  if (a.opens) { toast("That one's on the TV app for now"); return; }
   let choice = null;
   if (a.choose?.options?.length) {
     if (a.choose.options.length === 1) choice = a.choose.options[0].value;
@@ -922,6 +972,30 @@ function SeasonScreen(svc, itemId, season, showTitle, after) {
   return { el: p.el, title: season.label };
 }
 
+// ------------------------------------------------------------------ trailers
+function openTrailer(key, title) {
+  if (!key) return;
+  const watch = `https://www.youtube.com/watch?v=${enc(key)}`;
+  const frame = h("iframe", {
+    src: `https://www.youtube-nocookie.com/embed/${enc(key)}?playsinline=1&autoplay=1&rel=0&modestbranding=1`,
+    title: title ? `${title} trailer` : "Trailer", allow: "autoplay; encrypted-media; picture-in-picture; fullscreen",
+    allowfullscreen: true, referrerpolicy: "strict-origin-when-cross-origin",
+    style: "position:absolute;inset:0;width:100%;height:100%;border:0",
+  });
+  const m = h("div", { class: "modal trailer" },
+    h("div", { class: "navbar always solid" }, h("div", { class: "left" }),
+      h("div", { class: "title" }, title ? `${title}` : "Trailer"),
+      h("div", { class: "right" }, h("button", { class: "navbtn bold", onclick: () => close() }, "Done"))),
+    h("div", { class: "mbody", style: "display:flex;flex-direction:column;justify-content:center" },
+      h("div", { style: "position:relative;width:100%;aspect-ratio:16/9;background:#000" }, frame),
+      h("div", { class: "section", style: "margin-top:22px" }, h("div", { class: "group" },
+        h("a", { class: "cell tint center", href: watch, target: "_blank", rel: "noopener", style: "text-decoration:none" }, "Open in YouTube"))),
+      h("div", { class: "section-foot", style: "text-align:center;margin-top:-26px" }, "If it won't play here, YouTube may not allow it outside its own app.")));
+  document.body.append(m);
+  requestAnimationFrame(() => requestAnimationFrame(() => m.classList.add("show")));
+  function close() { frame.src = "about:blank"; m.classList.remove("show"); setTimeout(() => m.remove(), 360); }
+}
+
 // ------------------------------------------------------------------ manual search
 function ReleasesScreen(svc, itemId, arg, title, after) {
   const p = page({ title: "Manual search", back: "Back" });
@@ -960,6 +1034,119 @@ function ReleasesScreen(svc, itemId, arg, title, after) {
     status.remove(); p.body.append(seg, list); draw();
   }).catch(e => status.replaceWith(errorState(e)));
   return { el: p.el, title: "Manual search" };
+}
+
+// ------------------------------------------------------------------ Calendar
+const CAL_TONE = { downloaded: "ok", downloading: "info", airing: "bad", missing: "warn", upcoming: "", cinema: "purple", unmonitored: "" };
+const isoDay = d => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+const addDays = (d, n) => { const x = new Date(d); x.setDate(x.getDate() + n); return x; };
+const mondayOf = d => { const x = new Date(d.getFullYear(), d.getMonth(), d.getDate()); return addDays(x, -((x.getDay() + 6) % 7)); };
+
+function CalendarScreen() {
+  const todayBtn = h("button", { class: "navbtn", onclick: () => { sel = new Date(); week = mondayOf(sel); draw(true); } }, "Today");
+  const p = page({ title: "Calendar", large: true, right: [todayBtn] });
+  let week = mondayOf(new Date()), sel = new Date(), filter = lsGet("calFilter", "all");
+  let win = null, entries = [], loading = false, failed = null;
+  const strip = h("div", { class: "weekstrip" });
+  const pills = h("div", { class: "pills" });
+  const list = h("div", {});
+  p.body.append(strip, pills, list);
+
+  // swipe the week strip to change weeks
+  let sx = null;
+  strip.addEventListener("touchstart", e => { sx = e.touches[0].clientX; }, { passive: true });
+  strip.addEventListener("touchend", e => {
+    if (sx == null) return;
+    const dx = e.changedTouches[0].clientX - sx; sx = null;
+    if (Math.abs(dx) > 50) shift(dx < 0 ? 1 : -1);
+  });
+  function shift(n) {
+    week = addDays(week, 7 * n);
+    sel = isoDay(mondayOf(new Date())) === isoDay(week) ? new Date() : week;   // land on today in this week
+    draw(true);
+  }
+
+  async function ensure() {
+    const a = isoDay(week), b = isoDay(addDays(week, 6));
+    if (win && a >= win[0] && b <= win[1]) return;
+    const start = addDays(week, -7), end = addDays(week, 41);      // 7 weeks per fetch (gateway allows 70 days)
+    loading = true; failed = null; drawList();
+    try {
+      const r = await get(`/api/calendar?start=${isoDay(start)}&end=${isoDay(end)}`);
+      win = [isoDay(start), isoDay(end)]; entries = r.entries || [];
+    } catch (e) { failed = e; }
+    loading = false;
+  }
+  const shown = () => entries.filter(e => filter === "all" || (filter === "tv" ? e.kind === "tv" : e.kind === "movie"));
+  async function draw(scroll) {
+    drawStrip(); drawPills();
+    await ensure();
+    drawStrip(); drawList();
+    if (scroll) jump(isoDay(sel));
+  }
+  function drawStrip() {
+    const today = isoDay(new Date());
+    const counts = {};
+    for (const e of shown()) counts[e.date] = (counts[e.date] || 0) + 1;
+    const days = [...Array(7)].map((_, i) => addDays(week, i));
+    const mid = days[3];
+    strip.replaceChildren(
+      h("div", { class: "wk-head" },
+        h("button", { class: "navbtn", "aria-label": "Previous week", onclick: () => shift(-1) }, svg("back")),
+        h("div", { class: "wk-month" }, mid.toLocaleDateString(undefined, { month: "long", year: "numeric" })),
+        h("button", { class: "navbtn", "aria-label": "Next week", style: "transform:scaleX(-1)", onclick: () => shift(1) }, svg("back"))),
+      h("div", { class: "wk-days" }, days.map(d => {
+        const k = isoDay(d);
+        return h("button", { class: "wk-day" + (k === isoDay(sel) ? " sel" : "") + (k === today ? " today" : ""),
+          onclick: () => { sel = d; drawStrip(); jump(k); } },
+          h("span", { class: "dow" }, d.toLocaleDateString(undefined, { weekday: "narrow" })),
+          h("span", { class: "num" }, d.getDate()),
+          h("span", { class: "dots" }, counts[k] ? h("i", {}) : null));
+      })));
+  }
+  function drawPills() {
+    pills.replaceChildren(...[["all", "All"], ["tv", "TV"], ["movie", "Movies"]].map(([k, l]) =>
+      h("button", { class: filter === k ? "on" : "", onclick: () => { filter = k; lsSet("calFilter", k); drawPills(); drawStrip(); drawList(); } }, l)));
+  }
+  function dayLabel(k) {
+    const t = isoDay(new Date()), tm = isoDay(addDays(new Date(), 1)), y = isoDay(addDays(new Date(), -1));
+    const d = new Date(k + "T12:00:00");
+    const long = d.toLocaleDateString(undefined, { weekday: "long", day: "numeric", month: "long" });
+    return k === t ? `Today · ${long}` : k === tm ? `Tomorrow · ${long}` : k === y ? `Yesterday · ${long}` : long;
+  }
+  function drawList() {
+    if (loading && !entries.length) { list.replaceChildren(spinner()); return; }
+    if (failed) { list.replaceChildren(errorState(failed, () => { win = null; draw(); })); return; }
+    const a = isoDay(week), b = isoDay(addDays(week, 6));
+    const wk = shown().filter(e => e.date >= a && e.date <= b);
+    if (!wk.length) { list.replaceChildren(emptyState("Nothing this week", filter === "all" ? "No episodes or releases from Sonarr or Radarr." : "Try All.")); return; }
+    const byDay = {};
+    for (const e of wk) (byDay[e.date] = byDay[e.date] || []).push(e);
+    list.replaceChildren(...Object.keys(byDay).sort().map(k => h("div", { "data-day": k },
+      h("div", { class: "section-head cal-day" + (k === isoDay(new Date()) ? " today" : "") }, dayLabel(k)),
+      h("div", { class: "section" }, h("div", { class: "group" }, byDay[k].map(calRow))))));
+  }
+  function calRow(e) {
+    const th = h("div", { class: "thumb" });
+    if (e.poster) { const im = h("img", { src: e.poster, alt: "", loading: "lazy" }); im.onerror = () => im.remove(); th.append(im); }
+    const tone = CAL_TONE[e.status] || "";
+    const svc = (S.config?.services || []).find(s => `${s.kind}/${s.inst}` === e.svc);
+    return h("button", { class: "cell", style: "--inset:72px", onclick: () => svc && push(DetailScreen(svc, e.id, { title: e.title, poster: e.poster, backdrop: e.backdrop })) }, th,
+      h("div", { class: "main" },
+        h("div", { class: "t" }, e.title),
+        e.subtitle && h("div", { class: "s" }, e.subtitle),
+        h("div", { class: "s", style: "display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-top:4px" },
+          h("span", { class: "chip " + tone, style: "margin:0;font-size:11px;padding:2px 7px" }, e.label),
+          e.tag && e.tag !== e.label && h("span", { style: "font-weight:600;color:var(--label)" }, e.tag),
+          h("span", {}, [e.time && !(e.label || "").includes(e.time) ? e.time : "", e.network || e.source].filter(Boolean).join(" · ")))),
+      svg("chev"));
+  }
+  function jump(k) {
+    const el = list.querySelector(`[data-day="${k}"]`);
+    if (el) p.el.scrollTo({ top: el.offsetTop - 120, behavior: "smooth" });
+  }
+  draw(true);
+  return { el: p.el, title: "Calendar", refreshIfStale() { win = null; draw(); } };
 }
 
 // ------------------------------------------------------------------ Downloads
