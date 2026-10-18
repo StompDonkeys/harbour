@@ -10,6 +10,6 @@ services:
     ports:
       - "8765:8765"
     volumes:
-      - ./config:/config:ro
+      - ./config:/config   # writable: the iPhone app saves settings here
     environment:
       - TZ=Australia/Sydney

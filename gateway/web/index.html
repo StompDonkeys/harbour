@@ -1,0 +1,1386 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Harbour">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="theme-color" content="#f2f2f7" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#000000" media="(prefers-color-scheme: dark)">
+<meta name="format-detection" content="telephone=no">
+<link rel="manifest" href="/m/manifest.webmanifest">
+<link rel="apple-touch-icon" href="/m/icon-180.png">
+<link rel="icon" href="/m/icon-180.png">
+<title>Harbour</title>
+<style>
+:root {
+  --bg: #f2f2f7; --bg-plain: #ffffff; --cell: #ffffff; --cell-2: #e5e5ea; --fill: rgba(118,118,128,.12);
+  --label: #000; --label-2: rgba(60,60,67,.6); --label-3: rgba(60,60,67,.3);
+  --sep: rgba(60,60,67,.29); --tint: #007aff; --red: #ff3b30; --green: #34c759; --orange: #ff9500;
+  --bar: rgba(249,249,249,.82); --sheet-dim: rgba(0,0,0,.35); --skeleton: #e5e5ea;
+  --font: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", system-ui, sans-serif;
+  --top: env(safe-area-inset-top, 0px); --bottom: env(safe-area-inset-bottom, 0px);
+  --tabbar: calc(50px + var(--bottom));
+  color-scheme: light dark;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #000; --bg-plain: #000; --cell: #1c1c1e; --cell-2: #2c2c2e; --fill: rgba(118,118,128,.24);
+    --label: #fff; --label-2: rgba(235,235,245,.6); --label-3: rgba(235,235,245,.3);
+    --sep: rgba(84,84,88,.6); --tint: #0a84ff; --red: #ff453a; --green: #30d158; --orange: #ff9f0a;
+    --bar: rgba(22,22,23,.82); --sheet-dim: rgba(0,0,0,.55); --skeleton: #2c2c2e;
+  }
+}
+* { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+html, body { margin: 0; height: 100%; overflow: hidden; overscroll-behavior: none; background: var(--bg);
+  color: var(--label); font-family: var(--font); font-size: 17px; line-height: 1.29; -webkit-font-smoothing: antialiased;
+  -webkit-text-size-adjust: 100%; }
+button { font: inherit; color: inherit; background: none; border: 0; padding: 0; cursor: pointer; }
+input, select { font: inherit; color: inherit; }
+img { display: block; }
+.hidden { display: none !important; }
+
+/* ---------------------------------------------------------------- tabs & screens */
+#app { position: fixed; inset: 0; }
+.tab { position: absolute; inset: 0; overflow: hidden; }
+.screen { position: absolute; inset: 0; overflow-y: auto; overflow-x: hidden; -webkit-overflow-scrolling: touch;
+  background: var(--bg); padding-bottom: calc(var(--tabbar) + 24px); will-change: transform;
+  transition: transform .35s cubic-bezier(.2,.8,.2,1), filter .35s; overscroll-behavior-y: contain; }
+.screen.plain { background: var(--bg-plain); }
+.screen.below { transform: translateX(-28%); filter: brightness(.92); pointer-events: none; }
+.screen.enter { transform: translateX(100%); }
+.screen.dragging { transition: none; }
+
+.navbar { position: sticky; top: 0; z-index: 5; display: grid; grid-template-columns: 1fr auto 1fr; align-items: center;
+  height: calc(44px + var(--top)); padding: var(--top) 8px 0; background: transparent;
+  transition: background .2s, box-shadow .2s; }
+.navbar.solid, .screen:not(.root) .navbar.over-hero.solid { background: var(--bar); -webkit-backdrop-filter: saturate(180%) blur(20px);
+  backdrop-filter: saturate(180%) blur(20px); box-shadow: 0 .5px 0 var(--sep); }
+.navbar .title { font-weight: 600; font-size: 17px; text-align: center; white-space: nowrap; overflow: hidden;
+  text-overflow: ellipsis; max-width: 60vw; opacity: 0; transition: opacity .2s; }
+.navbar.solid .title, .navbar.always .title { opacity: 1; }
+.navbar .left, .navbar .right { display: flex; align-items: center; gap: 4px; min-width: 0; }
+.navbar .right { justify-content: flex-end; }
+.navbtn { color: var(--tint); height: 44px; padding: 0 8px; display: inline-flex; align-items: center; gap: 2px;
+  font-size: 17px; white-space: nowrap; max-width: 34vw; overflow: hidden; text-overflow: ellipsis; }
+.navbtn svg { width: 22px; height: 22px; flex: none; }
+.navbtn.back svg { width: 13px; height: 21px; margin-right: 4px; }
+.navbtn.bold { font-weight: 600; }
+.navbtn:disabled { opacity: .35; }
+.navbar.over-hero:not(.solid) .navbtn { color: #fff; filter: drop-shadow(0 1px 3px rgba(0,0,0,.6)); }
+.navbar.over-hero { margin-bottom: calc(-44px - var(--top)); }
+.large-title { font-size: 34px; font-weight: 700; letter-spacing: .37px; padding: 0 16px 8px; margin: 2px 0 0; }
+
+/* tab bar */
+#tabbar { position: fixed; left: 0; right: 0; bottom: 0; height: var(--tabbar); padding-bottom: var(--bottom);
+  display: flex; background: var(--bar); -webkit-backdrop-filter: saturate(180%) blur(20px); backdrop-filter: saturate(180%) blur(20px);
+  box-shadow: 0 -.5px 0 var(--sep); z-index: 20; }
+#tabbar button { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px;
+  color: var(--label-2); font-size: 10px; font-weight: 500; letter-spacing: .1px; padding-top: 2px; }
+#tabbar button svg { width: 26px; height: 26px; }
+#tabbar button.on { color: var(--tint); }
+
+/* ---------------------------------------------------------------- grouped lists */
+.section { margin: 0 16px 35px; }
+.section-head { font-size: 13px; text-transform: uppercase; color: var(--label-2); padding: 0 16px 7px; letter-spacing: -.08px; }
+.section-foot { font-size: 13px; color: var(--label-2); padding: 7px 16px 0; line-height: 1.35; }
+.group { background: var(--cell); border-radius: 10px; overflow: hidden; }
+.cell { display: flex; align-items: center; gap: 12px; min-height: 44px; padding: 0 16px; position: relative; width: 100%;
+  text-align: left; background: var(--cell); }
+.cell + .cell::before { content: ""; position: absolute; top: 0; left: var(--inset, 16px); right: 0; height: .5px; background: var(--sep); }
+button.cell:active, .cell.tap:active { background: var(--cell-2); }
+.cell .main { flex: 1; min-width: 0; padding: 11px 0; }
+.cell .t { overflow: hidden; text-overflow: ellipsis; }
+.cell .s { font-size: 13px; color: var(--label-2); margin-top: 2px; overflow: hidden; text-overflow: ellipsis; }
+.cell .v { color: var(--label-2); text-align: right; max-width: 62%; overflow-wrap: anywhere; padding: 11px 0; }
+.cell .chev { width: 8px; height: 13px; color: var(--label-3); flex: none; }
+.cell .mini { width: 22px; height: 22px; color: var(--label-3); flex: none; }
+.cell.tint { color: var(--tint); }
+.cell.danger { color: var(--red); }
+.cell.center { justify-content: center; }
+.cell .icon { width: 29px; height: 29px; border-radius: 7px; display: grid; place-items: center; flex: none; color: #fff; }
+.cell .icon svg { width: 18px; height: 18px; }
+.nowrap .t, .nowrap .s { white-space: nowrap; }
+
+/* fields */
+.field { display: block; padding: 10px 16px; position: relative; }
+.field + .field::before, .cell + .field::before, .field + .cell::before { content: ""; position: absolute; top: 0; left: 16px; right: 0; height: .5px; background: var(--sep); }
+.field .lbl { font-size: 13px; color: var(--label-2); margin-bottom: 3px; }
+.field input { width: 100%; border: 0; outline: 0; background: none; padding: 2px 0; font-size: 17px; }
+.field input::placeholder { color: var(--label-3); }
+.field .help { font-size: 12px; color: var(--label-2); margin-top: 3px; }
+.switch { position: relative; width: 51px; height: 31px; flex: none; }
+.switch input { opacity: 0; position: absolute; inset: 0; margin: 0; cursor: pointer; z-index: 1; }
+.switch span { position: absolute; inset: 0; border-radius: 16px; background: var(--fill); transition: background .2s; }
+.switch span::after { content: ""; position: absolute; top: 2px; left: 2px; width: 27px; height: 27px; border-radius: 50%;
+  background: #fff; box-shadow: 0 3px 8px rgba(0,0,0,.15), 0 1px 1px rgba(0,0,0,.16); transition: transform .2s; }
+.switch input:checked + span { background: var(--green); }
+.switch input:checked + span::after { transform: translateX(20px); }
+
+/* segmented */
+.seg { display: flex; background: var(--fill); border-radius: 9px; padding: 2px; gap: 0; }
+.seg button { flex: 1; font-size: 13px; font-weight: 500; padding: 6px 10px; border-radius: 7px; white-space: nowrap; }
+.seg button.on { background: var(--cell); box-shadow: 0 3px 8px rgba(0,0,0,.12), 0 3px 1px rgba(0,0,0,.04); font-weight: 600; }
+@media (prefers-color-scheme: dark) { .seg button.on { background: #636366; } }
+.pills { display: flex; gap: 8px; overflow-x: auto; padding: 0 16px 12px; scrollbar-width: none; }
+.pills::-webkit-scrollbar { display: none; }
+.pills button { flex: none; padding: 7px 14px; border-radius: 18px; background: var(--fill); font-size: 15px; font-weight: 500; }
+.pills button.on { background: var(--label); color: var(--bg-plain); }
+
+/* search */
+.search { margin: 0 16px 14px; display: flex; align-items: center; gap: 6px; background: var(--fill); border-radius: 10px;
+  height: 36px; padding: 0 8px; color: var(--label-2); }
+.search svg { width: 17px; height: 17px; flex: none; }
+.search input { flex: 1; border: 0; outline: 0; background: none; font-size: 17px; min-width: 0; color: var(--label); }
+.search input::placeholder { color: var(--label-2); }
+.search .clear { width: 18px; height: 18px; border-radius: 50%; background: var(--label-3); color: var(--bg-plain);
+  display: grid; place-items: center; font-size: 12px; line-height: 1; }
+
+/* ---------------------------------------------------------------- media */
+.hero { position: relative; margin: 0 16px 24px; border-radius: 14px; overflow: hidden; aspect-ratio: 16/9;
+  background: var(--skeleton); display: block; width: calc(100% - 32px); text-align: left; }
+.hero img { width: 100%; height: 100%; object-fit: cover; }
+.hero .shade { position: absolute; inset: 0; background: linear-gradient(transparent 40%, rgba(0,0,0,.78)); }
+.hero .cap { position: absolute; left: 14px; right: 14px; bottom: 12px; color: #fff; }
+.hero .cap .k { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .6px; opacity: .8; }
+.hero .cap .t { font-size: 22px; font-weight: 700; margin-top: 2px; }
+.hero .cap .s { font-size: 13px; opacity: .85; margin-top: 2px; }
+.row { margin-bottom: 26px; }
+.row-head { display: flex; align-items: baseline; justify-content: space-between; padding: 0 16px 9px; }
+.row-head h2 { font-size: 20px; font-weight: 700; margin: 0; letter-spacing: .38px; }
+.row-head button { color: var(--tint); font-size: 15px; }
+.scroller { display: flex; gap: 10px; overflow-x: auto; padding: 0 16px; scroll-snap-type: x mandatory;
+  scroll-padding: 0 16px; scrollbar-width: none; }
+.scroller::-webkit-scrollbar { display: none; }
+.card { flex: none; width: 112px; scroll-snap-align: start; text-align: left; }
+.card.land { width: 250px; }
+.art { position: relative; border-radius: 8px; overflow: hidden; background: var(--skeleton); aspect-ratio: 2/3; }
+.card.land .art { aspect-ratio: 16/9; }
+.art img { width: 100%; height: 100%; object-fit: cover; opacity: 0; transition: opacity .25s; }
+.art img.ok { opacity: 1; }
+.art .ph { position: absolute; inset: 0; display: grid; place-items: center; padding: 8px; text-align: center;
+  font-size: 12px; font-weight: 600; color: var(--label-2); }
+.badge { position: absolute; top: 6px; left: 6px; font-size: 10px; font-weight: 700; padding: 2px 6px; border-radius: 5px;
+  background: rgba(0,0,0,.62); color: #fff; letter-spacing: .2px; -webkit-backdrop-filter: blur(8px); backdrop-filter: blur(8px); }
+.badge.ok { background: rgba(36,138,61,.88); }
+.badge.warn { background: rgba(201,110,0,.9); }
+.badge.info { background: rgba(0,100,210,.88); }
+.badge.bad { background: rgba(200,40,40,.9); }
+.bar { position: absolute; left: 0; right: 0; bottom: 0; height: 4px; background: rgba(255,255,255,.3); }
+.bar i { display: block; height: 100%; background: var(--tint); }
+.card .t { font-size: 13px; font-weight: 500; margin-top: 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.card .s { font-size: 12px; color: var(--label-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 1px; }
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(104px, 1fr)); gap: 16px 10px; padding: 0 16px; }
+.grid .card { width: auto; }
+
+.thumb { width: 44px; aspect-ratio: 2/3; border-radius: 5px; overflow: hidden; background: var(--skeleton); flex: none; margin: 8px 0; }
+.thumb img { width: 100%; height: 100%; object-fit: cover; }
+
+/* detail */
+.backdrop { position: relative; aspect-ratio: 16/10; background: var(--skeleton); overflow: hidden; }
+.backdrop img { width: 100%; height: 100%; object-fit: cover; }
+.backdrop::after { content: ""; position: absolute; inset: 0;
+  background: linear-gradient(rgba(0,0,0,.35), transparent 30%, transparent 55%, var(--bg)); }
+.dhead { display: flex; gap: 14px; padding: 0 16px; margin-top: -70px; position: relative; z-index: 1; align-items: flex-end; }
+.dhead .poster { width: 104px; flex: none; border-radius: 8px; overflow: hidden; aspect-ratio: 2/3; background: var(--skeleton);
+  box-shadow: 0 8px 24px rgba(0,0,0,.35); }
+.dhead .poster img { width: 100%; height: 100%; object-fit: cover; }
+.dhead h1 { font-size: 24px; font-weight: 700; margin: 0 0 4px; line-height: 1.15; letter-spacing: .2px; }
+.dhead .sub { font-size: 14px; color: var(--label-2); }
+.dhead .chip { display: inline-block; margin-top: 7px; font-size: 12px; font-weight: 600; padding: 3px 8px; border-radius: 6px;
+  background: var(--fill); }
+.chip.ok { color: var(--green); } .chip.warn { color: var(--orange); } .chip.info { color: var(--tint); } .chip.bad { color: var(--red); }
+.overview { padding: 16px 16px 0; font-size: 15px; line-height: 1.42; color: var(--label); }
+.overview.clamp { display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; }
+.more-link { padding: 2px 16px 0; color: var(--tint); font-size: 15px; }
+.btns { display: flex; gap: 10px; padding: 18px 16px 24px; }
+.btn { flex: 1; height: 50px; border-radius: 12px; font-size: 17px; font-weight: 600; background: var(--fill); color: var(--tint);
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px; padding: 0 14px; }
+.btn.primary { background: var(--tint); color: #fff; }
+.btn.danger { color: var(--red); }
+.btn:active { opacity: .7; }
+.btn:disabled { opacity: .4; }
+.btn svg { width: 20px; height: 20px; }
+.people { display: flex; gap: 14px; overflow-x: auto; padding: 0 16px; scrollbar-width: none; }
+.people::-webkit-scrollbar { display: none; }
+.person { width: 72px; flex: none; text-align: center; }
+.person .ph2 { width: 72px; height: 72px; border-radius: 50%; overflow: hidden; background: var(--skeleton); display: grid;
+  place-items: center; color: var(--label-2); font-weight: 600; }
+.person img { width: 100%; height: 100%; object-fit: cover; }
+.person .n { font-size: 12px; margin-top: 6px; line-height: 1.2; }
+.person .r { font-size: 11px; color: var(--label-2); margin-top: 1px; line-height: 1.2; }
+.dot { width: 9px; height: 9px; border-radius: 50%; flex: none; background: var(--label-3); }
+.dot.on { background: var(--green); }
+.dot.miss { background: var(--orange); }
+
+/* releases */
+.rel .t { font-size: 14px; font-weight: 500; overflow-wrap: anywhere; line-height: 1.3; }
+.meta { display: flex; flex-wrap: wrap; gap: 4px 10px; font-size: 12px; color: var(--label-2); margin-top: 5px; }
+.meta b { font-weight: 600; color: var(--label); }
+.rej { font-size: 12px; color: var(--red); margin-top: 4px; }
+
+/* downloads */
+.client { background: var(--cell); border-radius: 12px; padding: 14px 16px; display: flex; align-items: center; gap: 12px; }
+.client + .client { margin-top: 10px; }
+.client .main { flex: 1; min-width: 0; }
+.client .t { font-weight: 600; }
+.client .s { font-size: 13px; color: var(--label-2); margin-top: 2px; }
+.client .speed { font-size: 22px; font-weight: 700; font-variant-numeric: tabular-nums; letter-spacing: -.2px; }
+.prog { height: 4px; border-radius: 2px; background: var(--fill); margin-top: 7px; overflow: hidden; }
+.prog i { display: block; height: 100%; background: var(--tint); border-radius: 2px; transition: width .6s; }
+.prog.paused i { background: var(--label-3); }
+.prog.done i { background: var(--green); }
+
+/* empty / errors / loading */
+.empty { text-align: center; padding: 60px 32px; color: var(--label-2); }
+.empty .t { font-size: 20px; font-weight: 600; color: var(--label); margin-bottom: 6px; }
+.empty .btn { margin-top: 18px; max-width: 200px; height: 44px; font-size: 15px; }
+.spin { width: 28px; height: 28px; margin: 60px auto; border: 3px solid var(--fill); border-top-color: var(--label-2);
+  border-radius: 50%; animation: spin .8s linear infinite; }
+.spin.small { width: 18px; height: 18px; margin: 0; border-width: 2px; display: inline-block; vertical-align: middle; }
+@keyframes spin { to { transform: rotate(360deg); } }
+.banner { margin: 0 16px 20px; padding: 12px 14px; border-radius: 12px; background: rgba(255,149,0,.14); color: var(--label);
+  font-size: 14px; line-height: 1.4; }
+.banner b { color: var(--orange); }
+.testres { font-size: 14px; padding: 10px 16px 0; }
+.testres.ok { color: var(--green); } .testres.bad { color: var(--red); }
+
+/* ---------------------------------------------------------------- overlays */
+#toast { position: fixed; left: 50%; top: calc(var(--top) + 10px); transform: translate(-50%, -150%); z-index: 60;
+  background: var(--cell); color: var(--label); padding: 11px 18px; border-radius: 22px; font-size: 15px; font-weight: 500;
+  box-shadow: 0 8px 30px rgba(0,0,0,.18); max-width: calc(100% - 32px); transition: transform .35s cubic-bezier(.2,.9,.3,1.2);
+  text-align: center; }
+#toast.show { transform: translate(-50%, 0); }
+#toast.bad { color: var(--red); }
+.dim { position: fixed; inset: 0; background: var(--sheet-dim); z-index: 40; opacity: 0; transition: opacity .25s; }
+.dim.show { opacity: 1; }
+.sheet { position: fixed; left: 8px; right: 8px; bottom: calc(8px + var(--bottom)); z-index: 41; transform: translateY(120%);
+  transition: transform .3s cubic-bezier(.2,.9,.3,1); max-height: 80vh; display: flex; flex-direction: column; gap: 8px; }
+.sheet.show { transform: none; }
+.sheet .grp { background: var(--bar); -webkit-backdrop-filter: blur(30px) saturate(180%); backdrop-filter: blur(30px) saturate(180%);
+  border-radius: 14px; overflow: hidden; overflow-y: auto; }
+.sheet .head { padding: 14px 16px; text-align: center; font-size: 13px; color: var(--label-2); line-height: 1.35; }
+.sheet .head b { display: block; font-size: 13px; font-weight: 600; margin-bottom: 2px; }
+.sheet .opt { display: block; width: 100%; min-height: 57px; padding: 10px 16px; font-size: 20px; color: var(--tint); text-align: center;
+  border-top: .5px solid var(--sep); }
+.sheet .opt:first-child { border-top: 0; }
+.sheet .head + .opt { border-top: .5px solid var(--sep); }
+.sheet .opt:active { background: var(--fill); }
+.sheet .opt.danger { color: var(--red); }
+.sheet .opt.cancel { font-weight: 600; background: var(--cell); }
+.sheet .opt.cur::after { content: " ✓"; }
+.alert { position: fixed; left: 50%; top: 45%; width: 270px; transform: translate(-50%, -50%) scale(1.15); opacity: 0; z-index: 42;
+  background: var(--bar); -webkit-backdrop-filter: blur(30px) saturate(180%); backdrop-filter: blur(30px) saturate(180%);
+  border-radius: 14px; overflow: hidden; transition: transform .2s, opacity .2s; text-align: center; }
+.alert.show { transform: translate(-50%, -50%) scale(1); opacity: 1; }
+.alert .body { padding: 19px 16px 18px; }
+.alert .at { font-weight: 600; font-size: 17px; }
+.alert .am { font-size: 13px; margin-top: 3px; line-height: 1.35; }
+.alert input { width: 100%; margin-top: 14px; padding: 7px 8px; border-radius: 7px; border: .5px solid var(--sep); background: var(--cell);
+  font-size: 15px; outline: 0; }
+.alert .ab { display: flex; border-top: .5px solid var(--sep); }
+.alert .ab button { flex: 1; height: 44px; color: var(--tint); font-size: 17px; }
+.alert .ab button + button { border-left: .5px solid var(--sep); }
+.alert .ab button.strong { font-weight: 600; }
+.alert .ab button.danger { color: var(--red); }
+.modal { position: fixed; inset: 0; z-index: 45; background: var(--bg); transform: translateY(100%); transition: transform .35s cubic-bezier(.2,.9,.3,1);
+  display: flex; flex-direction: column; }
+.modal.show { transform: none; }
+.modal .mbody { flex: 1; overflow-y: auto; padding-bottom: calc(var(--bottom) + 20px); }
+.modal .navbar { position: relative; }
+
+/* login */
+#login { position: fixed; inset: 0; z-index: 50; background: var(--bg); overflow-y: auto; padding: calc(var(--top) + 9vh) 0 40px; }
+#login .logo { width: 88px; height: 88px; border-radius: 20px; margin: 0 auto 18px; box-shadow: 0 6px 20px rgba(0,0,0,.18); overflow: hidden; }
+#login .logo img { width: 100%; height: 100%; }
+#login h1 { text-align: center; font-size: 28px; margin: 0 0 6px; }
+#login p { text-align: center; color: var(--label-2); font-size: 15px; margin: 0 32px 28px; line-height: 1.4; }
+#login .err { color: var(--red); text-align: center; font-size: 14px; min-height: 20px; margin: -18px 32px 8px; }
+#login .btn { width: calc(100% - 32px); margin: 0 16px; flex: none; }
+</style>
+</head>
+<body>
+<div id="app"></div>
+<nav id="tabbar" class="hidden"></nav>
+<div id="toast"></div>
+<div id="login" class="hidden"></div>
+
+<script>
+"use strict";
+/* Harbour for iPhone — talks only to the Harbour gateway it's served from. */
+
+// ------------------------------------------------------------------ tiny DOM helper
+function h(tag, attrs, ...kids) {
+  const el = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) {
+    if (v == null || v === false) continue;
+    if (k === "class") el.className = v;
+    else if (k === "style") el.style.cssText = v;
+    else if (k.startsWith("on")) el.addEventListener(k.slice(2), v);
+    else if (k === "html") el.innerHTML = v;            // only ever used with our own SVG constants
+    else el.setAttribute(k, v === true ? "" : v);
+  }
+  for (const c of kids.flat(Infinity)) {
+    if (c == null || c === false) continue;
+    el.append(c instanceof Node ? c : document.createTextNode(String(c)));
+  }
+  return el;
+}
+const $ = (s, el = document) => el.querySelector(s);
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+const ICON = {
+  back: '<svg viewBox="0 0 13 21"><path d="M11 1.5 2 10.5l9 9" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+  chev: '<svg class="chev" viewBox="0 0 8 13"><path d="m1.5 1.5 5 5-5 5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+  search: '<svg viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6.5" fill="none" stroke="currentColor" stroke-width="2.2"/><path d="m15.5 15.5 5 5" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg>',
+  refresh: '<svg viewBox="0 0 24 24"><path d="M20 12a8 8 0 1 1-2.34-5.66M20 4v5h-5" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+  more: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" fill="none" stroke="currentColor" stroke-width="1.8"/><circle cx="7.5" cy="12" r="1.4" fill="currentColor"/><circle cx="12" cy="12" r="1.4" fill="currentColor"/><circle cx="16.5" cy="12" r="1.4" fill="currentColor"/></svg>',
+  plus: '<svg viewBox="0 0 24 24"><path d="M12 4v16M4 12h16" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg>',
+  folderPlus: '<svg viewBox="0 0 24 24"><path d="M3 7.5A1.5 1.5 0 0 1 4.5 6h4.6l2 2h8.4A1.5 1.5 0 0 1 21 9.5v8A1.5 1.5 0 0 1 19.5 19h-15A1.5 1.5 0 0 1 3 17.5z" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M12 11v5M9.5 13.5h5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>',
+  play: '<svg viewBox="0 0 24 24"><path d="M8 5.5v13l10.5-6.5z" fill="currentColor"/></svg>',
+  pause: '<svg viewBox="0 0 24 24"><rect x="6.5" y="5" width="3.6" height="14" rx="1" fill="currentColor"/><rect x="13.9" y="5" width="3.6" height="14" rx="1" fill="currentColor"/></svg>',
+  tabLibrary: '<svg viewBox="0 0 28 28"><rect x="3.5" y="5.5" width="21" height="17" rx="3" fill="none" stroke="currentColor" stroke-width="2"/><path d="M3.5 10h21M3.5 18h21M8.5 5.5v4.5M8.5 18v4.5M14 5.5v4.5M14 18v4.5M19.5 5.5v4.5M19.5 18v4.5" stroke="currentColor" stroke-width="2"/></svg>',
+  tabDiscover: '<svg viewBox="0 0 28 28"><circle cx="14" cy="14" r="10.5" fill="none" stroke="currentColor" stroke-width="2"/><path d="m18.5 9.5-2.6 6.4-6.4 2.6 2.6-6.4z" fill="currentColor"/></svg>',
+  tabDownloads: '<svg viewBox="0 0 28 28"><circle cx="14" cy="14" r="10.5" fill="none" stroke="currentColor" stroke-width="2"/><path d="M14 8.5v10M9.8 14.5l4.2 4.2 4.2-4.2" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+  tabFiles: '<svg viewBox="0 0 28 28"><path d="M3.5 8.5a2 2 0 0 1 2-2h5.6l2.4 2.6h9a2 2 0 0 1 2 2V21a2 2 0 0 1-2 2h-17a2 2 0 0 1-2-2z" fill="none" stroke="currentColor" stroke-width="2"/></svg>',
+  tabSettings: '<svg viewBox="0 0 28 28"><path d="M14 3.8l2 .3.6 2.5 1.6.7 2.2-1.3 1.6 1.2 1.2 1.6-1.3 2.2.7 1.6 2.5.6.3 2-.3 2-2.5.6-.7 1.6 1.3 2.2-1.2 1.6-1.6 1.2-2.2-1.3-1.6.7-.6 2.5-2 .3-2-.3-.6-2.5-1.6-.7-2.2 1.3-1.6-1.2-1.2-1.6 1.3-2.2-.7-1.6-2.5-.6-.3-2 .3-2 2.5-.6.7-1.6-1.3-2.2 1.2-1.6 1.6-1.2 2.2 1.3 1.6-.7.6-2.5z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><circle cx="14" cy="14" r="3.6" fill="none" stroke="currentColor" stroke-width="1.9"/></svg>',
+  folder: '<svg viewBox="0 0 24 24"><path d="M2.5 6.5A1.5 1.5 0 0 1 4 5h5.2l2 2.2H20a1.5 1.5 0 0 1 1.5 1.5V18A1.5 1.5 0 0 1 20 19.5H4A1.5 1.5 0 0 1 2.5 18z" fill="currentColor"/></svg>',
+  file: '<svg viewBox="0 0 24 24"><path d="M6 2.5h8l5 5V20a1.5 1.5 0 0 1-1.5 1.5h-11A1.5 1.5 0 0 1 5 20V4a1.5 1.5 0 0 1 1-1.5z" fill="currentColor" opacity=".9"/><path d="M14 2.5V7.5h5" fill="none" stroke="#fff" stroke-opacity=".55" stroke-width="1.2"/></svg>',
+  film: '<svg viewBox="0 0 24 24"><rect x="3" y="4.5" width="18" height="15" rx="2.5" fill="currentColor"/><path d="M3 9h18M3 15h18" stroke="#fff" stroke-opacity=".5" stroke-width="1.3"/></svg>',
+  tv: '<svg viewBox="0 0 24 24"><rect x="2.5" y="4.5" width="19" height="12.5" rx="2" fill="currentColor"/><path d="M8 20h8" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>',
+  compass: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" fill="currentColor"/><path d="m15.8 8.2-2.2 5.4-5.4 2.2 2.2-5.4z" fill="#fff"/></svg>',
+  down: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" fill="currentColor"/><path d="M12 7.5v8M8.5 12.5 12 16l3.5-3.5" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+  drive: '<svg viewBox="0 0 24 24"><rect x="3" y="6" width="18" height="12" rx="2.5" fill="currentColor"/><circle cx="17" cy="12" r="1.3" fill="#fff"/></svg>',
+  key: '<svg viewBox="0 0 24 24"><circle cx="8" cy="12" r="4.5" fill="none" stroke="currentColor" stroke-width="2.4"/><path d="M12.5 12H21M18 12v3.5M21 12v2.5" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/></svg>',
+  gear: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5" fill="currentColor"/><circle cx="12" cy="12" r="3" fill="#fff"/></svg>',
+};
+const svg = (name, cls) => { const s = h("span", { html: ICON[name] }).firstChild; if (cls) s.classList.add(...cls.split(" ")); return s; };
+
+// ------------------------------------------------------------------ formatting
+function fmtBytes(b) {
+  if (!b || b < 0) return "0 B";
+  const u = ["B", "KB", "MB", "GB", "TB"]; let i = 0;
+  while (b >= 1000 && i < u.length - 1) { b /= 1000; i++; }
+  return (b >= 100 || i === 0 ? Math.round(b) : b.toFixed(1)) + " " + u[i];
+}
+const fmtSpeed = b => fmtBytes(b) + "/s";
+function fmtEta(s) {
+  if (s == null || s < 0) return "";
+  if (s < 60) return s + "s";
+  const m = Math.floor(s / 60), hr = Math.floor(m / 60), d = Math.floor(hr / 24);
+  if (d) return `${d}d ${hr % 24}h`;
+  if (hr) return `${hr}h ${m % 60}m`;
+  return `${m}m ${s % 60}s`;
+}
+function fmtDate(t) {
+  if (!t) return "";
+  return new Date(t * 1000).toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" });
+}
+
+// ------------------------------------------------------------------ gateway client
+class NeedLogin extends Error {}
+async function api(method, path, body) {
+  let r;
+  try {
+    r = await fetch(path, {
+      method, credentials: "same-origin",
+      headers: { "X-Harbour-Web": "1", "Accept": "application/json", ...(body !== undefined ? { "Content-Type": "application/json" } : {}) },
+      body: body !== undefined ? JSON.stringify(body) : undefined,
+    });
+  } catch (e) {
+    throw new Error("Can't reach Harbour — check your connection");
+  }
+  let j = null;
+  try { j = await r.json(); } catch (e) { /* not JSON */ }
+  if (r.status === 401 && j && j.login) { showLogin(); throw new NeedLogin(j.error); }
+  if (!r.ok) throw new Error((j && j.error) || `Harbour returned HTTP ${r.status}`);
+  return j || {};
+}
+const get = p => api("GET", p);
+const post = (p, b) => api("POST", p, b || {});
+const enc = encodeURIComponent;
+const svcPath = s => `/api/svc/${enc(s.kind)}/${enc(s.inst)}`;
+
+// ------------------------------------------------------------------ state
+const S = {
+  config: null,
+  tab: localStorage.getItem("tab") || "library",
+  tabs: {},            // id -> {el, stack: [screen]}
+};
+function lsGet(k, d) { try { return localStorage.getItem(k) ?? d; } catch (e) { return d; } }
+function lsSet(k, v) { try { localStorage.setItem(k, v); } catch (e) { /* private mode */ } }
+
+// ------------------------------------------------------------------ toast / sheets / alerts
+let toastTimer;
+function toast(msg, bad) {
+  const t = $("#toast");
+  t.textContent = msg; t.classList.toggle("bad", !!bad); t.classList.add("show");
+  clearTimeout(toastTimer); toastTimer = setTimeout(() => t.classList.remove("show"), bad ? 4200 : 2600);
+}
+function errToast(e) { if (!(e instanceof NeedLogin)) toast(e.message || String(e), true); }
+
+function overlay(build) {
+  return new Promise(resolve => {
+    const dim = h("div", { class: "dim" });
+    let done = false;
+    const close = v => {
+      if (done) return; done = true;
+      dim.classList.remove("show"); box.classList.remove("show");
+      setTimeout(() => { dim.remove(); box.remove(); }, 320);
+      resolve(v);
+    };
+    const box = build(close);
+    dim.addEventListener("click", () => close(null));
+    document.body.append(dim, box);
+    requestAnimationFrame(() => requestAnimationFrame(() => { dim.classList.add("show"); box.classList.add("show"); }));
+    const inp = box.querySelector("input"); if (inp) setTimeout(() => inp.focus(), 250);
+  });
+}
+/** iOS action sheet. options: [{label, value, danger, current}] → resolves value or null. */
+function actionSheet(title, message, options) {
+  return overlay(close => h("div", { class: "sheet" },
+    h("div", { class: "grp" },
+      (title || message) && h("div", { class: "head" }, title && h("b", {}, title), message),
+      options.map(o => h("button", { class: "opt" + (o.danger ? " danger" : "") + (o.current ? " cur" : ""), onclick: () => close(o.value) }, o.label))),
+    h("button", { class: "opt cancel grp", onclick: () => close(null) }, "Cancel")));
+}
+/** iOS alert. buttons: [{label, value, style: "strong"|"danger"}]; input: {value, placeholder}. */
+function alertBox(title, message, buttons, input) {
+  return overlay(close => {
+    const inp = input ? h("input", { value: input.value || "", placeholder: input.placeholder || "", autocapitalize: "off",
+      autocorrect: "off", spellcheck: "false", onkeydown: e => { if (e.key === "Enter") close({ value: buttons[buttons.length - 1].value, text: inp.value }); } }) : null;
+    return h("div", { class: "alert" },
+      h("div", { class: "body" }, h("div", { class: "at" }, title), message && h("div", { class: "am" }, message), inp),
+      h("div", { class: "ab" }, buttons.map(b => h("button", { class: b.style || "", onclick: () => close(input ? { value: b.value, text: inp.value } : b.value) }, b.label))));
+  });
+}
+const confirmBox = (title, message, okLabel = "OK", danger = false) =>
+  alertBox(title, message, [{ label: "Cancel", value: false }, { label: okLabel, value: true, style: danger ? "danger strong" : "strong" }]);
+async function promptBox(title, message, value, okLabel = "OK") {
+  const r = await alertBox(title, message, [{ label: "Cancel", value: false }, { label: okLabel, value: true, style: "strong" }], { value });
+  return r && r.value ? r.text.trim() : null;
+}
+
+// ------------------------------------------------------------------ navigation
+const TABS = [
+  { id: "library", label: "Library", icon: "tabLibrary", root: () => LibraryScreen(), show: () => arrServices().length > 0 },
+  { id: "discover", label: "Discover", icon: "tabDiscover", root: () => DiscoverScreen(), show: () => !!seerrService() },
+  { id: "downloads", label: "Downloads", icon: "tabDownloads", root: () => DownloadsScreen(), show: () => !!S.config?.downloads },
+  { id: "files", label: "Files", icon: "tabFiles", root: () => FilesScreen(""), show: () => !!S.config?.files },
+  { id: "settings", label: "Settings", icon: "tabSettings", root: () => SettingsScreen(), show: () => true },
+];
+const arrServices = () => (S.config?.services || []).filter(s => s.kind === "radarr" || s.kind === "sonarr");
+const seerrService = () => (S.config?.services || []).find(s => s.kind === "seerr");
+
+function buildTabs() {
+  const app = $("#app"), bar = $("#tabbar");
+  app.innerHTML = ""; bar.innerHTML = ""; S.tabs = {};
+  const visible = TABS.filter(t => t.show());
+  if (!visible.find(t => t.id === S.tab)) S.tab = visible[0].id;
+  for (const t of visible) {
+    const el = h("div", { class: "tab hidden", "data-tab": t.id });
+    app.append(el);
+    S.tabs[t.id] = { el, stack: [], def: t };
+    bar.append(h("button", { "data-tab": t.id, onclick: () => selectTab(t.id) }, svg(t.icon), t.label));
+  }
+  bar.classList.remove("hidden");
+  selectTab(S.tab, true);
+}
+function selectTab(id, first) {
+  const t = S.tabs[id];
+  if (!t) return;
+  if (S.tab === id && !first) {           // tap the current tab: back to its root, or scroll to top
+    if (t.stack.length > 1) popTo(id, 0);
+    else if (t.stack[0]) t.stack[0].el.scrollTo({ top: 0, behavior: "smooth" });
+    return;
+  }
+  const prev = S.tabs[S.tab];
+  if (prev && prev !== t) { prev.el.classList.add("hidden"); topOf(prev)?.hide?.(); }
+  S.tab = id; lsSet("tab", id);
+  t.el.classList.remove("hidden");
+  document.querySelectorAll("#tabbar button").forEach(b => b.classList.toggle("on", b.dataset.tab === id));
+  if (!t.stack.length) push(t.def.root(), id, true);
+  else topOf(t)?.show?.();
+}
+const topOf = t => t.stack[t.stack.length - 1];
+
+/** A screen: {el, title, show(), hide(), destroy()}; push() mounts it on the current tab. */
+function push(screen, tabId = S.tab, isRoot = false) {
+  const t = S.tabs[tabId];
+  const below = topOf(t);
+  screen.tab = tabId;
+  screen.el.classList.add("screen");
+  if (isRoot) screen.el.classList.add("root");
+  if (!isRoot) screen.el.classList.add("enter");
+  t.el.append(screen.el);
+  t.stack.push(screen);
+  if (!isRoot) {
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      screen.el.classList.remove("enter");
+      below?.el.classList.add("below");
+    }));
+    attachSwipeBack(screen);
+  }
+  below?.hide?.();
+  screen.show?.();
+  return screen;
+}
+function pop(tabId = S.tab) {
+  const t = S.tabs[tabId];
+  if (t.stack.length < 2) return;
+  const s = t.stack.pop(), below = topOf(t);
+  s.el.classList.remove("dragging"); s.el.style.transform = "";
+  s.el.classList.add("enter");
+  below.el.classList.remove("below"); below.el.style.transform = ""; below.el.style.filter = "";
+  s.hide?.(); s.destroy?.();
+  setTimeout(() => s.el.remove(), 360);
+  below.show?.();
+  below.refreshIfStale?.();
+}
+function popTo(tabId, depth) { while (S.tabs[tabId].stack.length > depth + 1) pop(tabId); }
+
+function attachSwipeBack(screen) {
+  const el = screen.el;
+  let x0 = null, y0 = 0, dx = 0, active = false;
+  el.addEventListener("touchstart", e => {
+    const t = e.touches[0];
+    if (t.clientX > 28) return;
+    x0 = t.clientX; y0 = t.clientY; dx = 0; active = false;
+  }, { passive: true });
+  el.addEventListener("touchmove", e => {
+    if (x0 == null) return;
+    const t = e.touches[0];
+    dx = Math.max(0, t.clientX - x0);
+    if (!active && Math.abs(t.clientY - y0) > 14 && dx < 14) { x0 = null; return; }
+    if (!active && dx > 10) { active = true; el.classList.add("dragging"); below()?.el.classList.add("dragging"); }
+    if (active) {
+      el.style.transform = `translateX(${dx}px)`;
+      const b = below(); if (b) b.el.style.transform = `translateX(${-28 + 28 * dx / innerWidth}%)`;
+    }
+  }, { passive: true });
+  el.addEventListener("touchend", () => {
+    if (x0 == null) return;
+    const b = below();
+    el.classList.remove("dragging"); b?.el.classList.remove("dragging");
+    if (active && dx > innerWidth * .33) pop(screen.tab);
+    else { el.style.transform = ""; if (b) b.el.style.transform = ""; }
+    x0 = null; active = false;
+  });
+  function below() { const st = S.tabs[screen.tab].stack; const i = st.indexOf(screen); return i > 0 ? st[i - 1] : null; }
+}
+
+/** Standard page scaffolding: nav bar (+ large title on root screens) and a body to fill. */
+function page({ title, large, back, right = [], plain, overHero }) {
+  const titleEl = h("div", { class: "title" }, title || "");
+  const nav = h("div", { class: "navbar" + (large || overHero ? "" : " always") + (overHero ? " over-hero" : "") },
+    h("div", { class: "left" }, back && h("button", { class: "navbtn back", onclick: () => pop() }, svg("back"), back)),
+    titleEl,
+    h("div", { class: "right" }, right));
+  const body = h("div", {});
+  const el = h("div", { class: plain ? "plain" : "" }, nav, large && h("h1", { class: "large-title" }, title), body);
+  const threshold = overHero ? 200 : large ? 38 : 2;
+  el.addEventListener("scroll", () => nav.classList.toggle("solid", el.scrollTop > threshold), { passive: true });
+  if (!large && !overHero) nav.classList.add("solid");
+  return { el, nav, body, titleEl, setTitle(t) { titleEl.textContent = t; const lt = $(".large-title", el); if (lt) lt.textContent = t; } };
+}
+const prevTitle = () => { const st = S.tabs[S.tab].stack; return topOf(S.tabs[S.tab])?.title || (st.length ? "Back" : ""); };
+const spinner = () => h("div", { class: "spin" });
+function emptyState(title, msg, retry) {
+  return h("div", { class: "empty" }, h("div", { class: "t" }, title), msg && h("div", {}, msg),
+    retry && h("button", { class: "btn", onclick: retry }, "Try again"));
+}
+function errorState(e, retry) { return emptyState("Couldn't load", e instanceof NeedLogin ? "Sign in to continue" : e.message, retry); }
+
+function art(url, alt) {
+  const box = h("div", { class: "art" }, h("div", { class: "ph" }, alt || ""));
+  if (url) {
+    const img = h("img", { src: url, alt: "", loading: "lazy", decoding: "async" });
+    img.addEventListener("load", () => { img.classList.add("ok"); box.firstChild.textContent = ""; });
+    img.addEventListener("error", () => img.remove());
+    box.append(img);
+  }
+  return box;
+}
+function badge(item) {
+  return item.badge ? h("span", { class: "badge " + (item.badgeTone || "") }, item.badge) : null;
+}
+function mediaCard(item, svc, land) {
+  const a = art(land ? (item.backdrop || item.poster) : (item.poster || item.backdrop), item.title);
+  const b = badge(item); if (b) a.append(b);
+  if (item.progress != null) a.append(h("div", { class: "bar" }, h("i", { style: `width:${Math.round(item.progress * 100)}%` })));
+  return h("button", { class: "card" + (land ? " land" : ""), onclick: () => openItem(svc, item) },
+    a, h("div", { class: "t" }, item.title), item.subtitle && h("div", { class: "s" }, item.subtitle));
+}
+function openItem(svc, item) {
+  push(DetailScreen(svc, item.id, item));
+}
+function rowView(row, svc) {
+  const land = row.style === "landscape" || row.style === "wide";
+  return h("section", { class: "row" },
+    h("div", { class: "row-head" }, h("h2", {}, row.title),
+      (row.more || row.items.length > 6) && h("button", { onclick: () => push(RowScreen(svc, row)) }, "See all")),
+    h("div", { class: "scroller" }, row.items.map(it => mediaCard(it, svc, land))));
+}
+function heroView(item, svc, kicker) {
+  const im = h("img", { src: item.backdrop || item.poster || "", alt: "" });
+  im.addEventListener("error", () => im.remove());
+  return h("button", { class: "hero", onclick: () => openItem(svc, item) }, im, h("div", { class: "shade" }),
+    h("div", { class: "cap" }, kicker && h("div", { class: "k" }, kicker), h("div", { class: "t" }, item.title),
+      item.subtitle && h("div", { class: "s" }, item.subtitle)));
+}
+function listItem(item, svc) {
+  const th = h("div", { class: "thumb" });
+  if (item.poster) { const im = h("img", { src: item.poster, alt: "", loading: "lazy" }); im.onerror = () => im.remove(); th.append(im); }
+  return h("button", { class: "cell", style: "--inset:72px", onclick: () => openItem(svc, item) }, th,
+    h("div", { class: "main" }, h("div", { class: "t" }, item.title), item.subtitle && h("div", { class: "s" }, item.subtitle)),
+    item.badge && h("span", { class: "chip " + (item.badgeTone || ""), style: "font-size:12px;font-weight:600" }, item.badge),
+    svg("chev"));
+}
+
+/** Search field that calls `run(q)` after typing stops; empty → `clear()`. */
+function searchField(placeholder, run, clear) {
+  let timer, seq = 0;
+  const input = h("input", { type: "search", placeholder, autocapitalize: "off", autocorrect: "off", enterkeyhint: "search" });
+  const x = h("button", { class: "clear hidden", onclick: () => { input.value = ""; x.classList.add("hidden"); clear(); } }, "✕");
+  input.addEventListener("input", () => {
+    clearTimeout(timer);
+    const q = input.value.trim();
+    x.classList.toggle("hidden", !input.value);
+    if (!q) { clear(); return; }
+    timer = setTimeout(() => run(q, ++seq, () => seq), 380);
+  });
+  input.addEventListener("keydown", e => { if (e.key === "Enter") input.blur(); });
+  return { el: h("label", { class: "search" }, svg("search"), input, x), input };
+}
+
+// ------------------------------------------------------------------ Library (Radarr / Sonarr)
+function LibraryScreen() {
+  const p = page({ title: "Library", large: true, plain: true, right: [h("button", { class: "navbtn", onclick: () => load(true) }, svg("refresh"))] });
+  const services = arrServices();
+  let cur = services.find(s => `${s.kind}/${s.inst}` === lsGet("libSvc")) || services[0];
+  const pills = h("div", { class: "pills" });
+  const content = h("div", {});
+  const search = searchField("Search", async (q, n, latest) => {
+    content.replaceChildren(spinner());
+    try {
+      const r = await get(`${svcPath(cur)}/search?q=${enc(q)}`);
+      if (n !== latest()) return;
+      content.replaceChildren(r.items.length ? h("div", { class: "section" }, h("div", { class: "group" }, r.items.map(i => listItem(i, cur))))
+        : emptyState("No results", `Nothing in ${cur.name} matches “${q}”.`));
+    } catch (e) { content.replaceChildren(errorState(e)); }
+  }, () => load());
+  function drawPills() {
+    pills.replaceChildren(...services.map(s => h("button", { class: s === cur ? "on" : "", onclick: () => {
+      if (s === cur) return; cur = s; lsSet("libSvc", `${s.kind}/${s.inst}`); drawPills();
+      search.input.value = ""; load();
+    } }, s.name)));
+  }
+  let loadedAt = 0;
+  async function load(force) {
+    content.replaceChildren(spinner());
+    try {
+      const pageData = await get(`${svcPath(cur)}/home${force ? "?fresh=1" : ""}`);
+      loadedAt = Date.now();
+      const kids = [];
+      if (pageData.hero) kids.push(heroView(pageData.hero, cur, "Featured"));
+      for (const r of pageData.rows || []) if (r.items?.length) kids.push(rowView(r, cur));
+      kids.push(h("div", { class: "section" }, h("div", { class: "group" },
+        h("button", { class: "cell", onclick: () => push(AllScreen(cur)) }, h("div", { class: "main" }, h("div", { class: "t" }, `All ${cur.kind === "sonarr" ? "series" : "movies"}`)), svg("chev")))));
+      content.replaceChildren(...(kids.length > 1 ? kids : [emptyState("Nothing here yet", `${cur.name} has no titles.`)]));
+    } catch (e) { content.replaceChildren(errorState(e, () => load())); }
+  }
+  if (services.length > 1) drawPills();
+  p.body.append(search.el, services.length > 1 ? pills : "", content);
+  load();
+  return { el: p.el, title: "Library", refreshIfStale() { if (Date.now() - loadedAt > 60000 && !search.input.value) load(); } };
+}
+
+/** Every title in a Radarr/Sonarr instance, A–Z, with a filter field. */
+function AllScreen(svc) {
+  const title = svc.kind === "sonarr" ? "All series" : "All movies";
+  const p = page({ title, back: svc.name, plain: true });
+  const list = h("div", {});
+  let items = [];
+  const filter = searchField("Filter", q => draw(q), () => draw(""));
+  function draw(q) {
+    const ql = q.toLowerCase();
+    const shown = items.filter(i => !ql || i.title.toLowerCase().includes(ql));
+    list.replaceChildren(shown.length ? h("div", { class: "section" }, h("div", { class: "group" }, shown.map(i => listItem(i, svc))))
+      : emptyState("No matches"));
+  }
+  p.body.append(filter.el, list);
+  list.append(spinner());
+  get(`${svcPath(svc)}/search?q=`).then(r => {
+    items = (r.items || []).slice().sort((a, b) => a.title.localeCompare(b.title, undefined, { sensitivity: "base", ignorePunctuation: true }));
+    draw("");
+  }).catch(e => list.replaceChildren(errorState(e)));
+  return { el: p.el, title };
+}
+
+/** A whole row as a grid; rows with a key page in more from the gateway. */
+function RowScreen(svc, row) {
+  const p = page({ title: row.title, back: prevTitle(), plain: true });
+  const land = row.style === "landscape" || row.style === "wide";
+  const grid = h("div", { class: "grid", style: land ? "grid-template-columns:repeat(auto-fill,minmax(160px,1fr))" : "" });
+  const moreBox = h("div", {});
+  let page_ = 1, hasMore = !!row.more && !!row.key, busy = false;
+  const seen = new Set();
+  function add(items) { for (const it of items) { if (seen.has(it.key)) continue; seen.add(it.key); grid.append(mediaCard(it, svc, land)); } }
+  add(row.items);
+  async function more() {
+    if (busy || !hasMore) return;
+    busy = true; moreBox.replaceChildren(spinner());
+    try {
+      const r = await get(`${svcPath(svc)}/row?key=${enc(row.key)}&page=${page_ + 1}`);
+      page_ = r.page || page_ + 1; hasMore = !!r.hasMore; add(r.items || []);
+    } catch (e) { hasMore = false; errToast(e); }
+    moreBox.replaceChildren(); busy = false;
+  }
+  p.el.addEventListener("scroll", () => { if (p.el.scrollTop + p.el.clientHeight > p.el.scrollHeight - 600) more(); }, { passive: true });
+  p.body.append(grid, moreBox);
+  if (hasMore) setTimeout(more, 50);
+  return { el: p.el, title: row.title };
+}
+
+// ------------------------------------------------------------------ Discover (Jellyseerr)
+function DiscoverScreen() {
+  const svc = seerrService();
+  const p = page({ title: "Discover", large: true, plain: true, right: [h("button", { class: "navbtn", onclick: () => load() }, svg("refresh"))] });
+  const content = h("div", {});
+  const search = searchField("Movies, shows, people", async (q, n, latest) => {
+    content.replaceChildren(spinner());
+    try {
+      const r = await get(`${svcPath(svc)}/search?q=${enc(q)}`);
+      if (n !== latest()) return;
+      content.replaceChildren(r.items.length ? h("div", { class: "section" }, h("div", { class: "group" }, r.items.map(i => listItem(i, svc))))
+        : emptyState("No results", `Nothing matches “${q}”.`));
+    } catch (e) { content.replaceChildren(errorState(e)); }
+  }, () => load());
+  async function load() {
+    content.replaceChildren(spinner());
+    try {
+      const d = await get(`${svcPath(svc)}/home`);
+      const kids = [];
+      if (d.hero) kids.push(heroView(d.hero, svc, "Trending"));
+      for (const r of d.rows || []) if (r.items?.length) kids.push(rowView(r, svc));
+      content.replaceChildren(...(kids.length ? kids : [emptyState("Nothing to show")]));
+    } catch (e) { content.replaceChildren(errorState(e, load)); }
+  }
+  p.body.append(search.el, content);
+  load();
+  return { el: p.el, title: "Discover" };
+}
+
+// ------------------------------------------------------------------ detail pages
+function DetailScreen(svc, id, preview) {
+  const back = prevTitle();
+  const p = page({ title: preview?.title || "", back, overHero: true, plain: false });
+  let data = null, stale = false;
+  const holder = h("div", {});
+  p.body.append(holder);
+  if (preview) holder.append(header(preview), spinner()); else holder.append(spinner());
+
+  function header(item) {
+    const bd = h("div", { class: "backdrop" });
+    const src = item.backdrop || item.poster;
+    if (src) { const im = h("img", { src, alt: "" }); im.onerror = () => im.remove(); bd.append(im); }
+    const po = h("div", { class: "poster" });
+    if (item.poster) { const im = h("img", { src: item.poster, alt: "" }); im.onerror = () => im.remove(); po.append(im); }
+    return [bd, h("div", { class: "dhead" }, po, h("div", { style: "min-width:0;padding-bottom:2px" },
+      h("h1", {}, item.title), item.subtitle && h("div", { class: "sub" }, item.subtitle),
+      item.badge && h("span", { class: "chip " + (item.badgeTone || "") }, item.badge)))];
+  }
+  async function load() {
+    try {
+      data = await get(`${svcPath(svc)}/item/${enc(id)}`);
+      stale = false;
+      draw();
+    } catch (e) { holder.replaceChildren(...(preview ? header(preview) : []), errorState(e, load)); }
+  }
+  function draw() {
+    const d = data, it = d.item || preview || {};
+    p.setTitle(it.title || "");
+    const kids = [...header(it)];
+    if (it.overview) {
+      const ov = h("div", { class: "overview clamp" }, it.overview);
+      kids.push(ov);
+      if (it.overview.length > 220) {
+        const more = h("button", { class: "more-link", onclick: () => { ov.classList.remove("clamp"); more.remove(); } }, "More");
+        kids.push(more);
+      }
+    }
+    const acts = d.actions || [];
+    const primary = acts.filter(a => a.style === "primary").slice(0, 2);
+    const rest = acts.filter(a => !primary.includes(a));
+    kids.push(h("div", { class: "btns" }, primary.map(a => actionButton(a, "btn primary")),
+      rest.length ? h("button", { class: "btn", style: primary.length ? "flex:0 0 50px;padding:0" : "", onclick: () => moreActions(rest, it.title) },
+        svg("more"), primary.length ? "" : "Actions") : null));
+    if (d.seasons?.length) {
+      kids.push(h("div", { class: "section-head" }, "Seasons"),
+        h("div", { class: "section" }, h("div", { class: "group" }, d.seasons.map(s => h("button", { class: "cell", onclick: () => push(SeasonScreen(svc, id, s, it.title, reload)) },
+          h("div", { class: "main" }, h("div", { class: "t" }, s.label), s.subtitle && h("div", { class: "s" }, s.subtitle)),
+          (s.episodes || []).length ? h("span", { class: "v", style: "padding:0" }, `${s.episodes.length}`) : null, svg("chev"))))));
+    }
+    if (d.facts?.length) {
+      kids.push(h("div", { class: "section-head" }, "Details"),
+        h("div", { class: "section" }, h("div", { class: "group" }, d.facts.map(f =>
+          h("div", { class: "cell" }, h("div", { class: "main", style: "flex:none;color:var(--label)" }, f.label), h("div", { class: "v", style: "flex:1" }, f.value))))));
+    }
+    if (d.people?.length) {
+      kids.push(h("div", { class: "row" }, h("div", { class: "row-head" }, h("h2", {}, "Cast")),
+        h("div", { class: "people" }, d.people.map(pe => {
+          const ph = h("div", { class: "ph2" }, (pe.name || "?").split(" ").map(w => w[0]).slice(0, 2).join(""));
+          if (pe.photo) { const im = h("img", { src: pe.photo, alt: "", loading: "lazy" }); im.onload = () => { ph.textContent = ""; ph.append(im); }; }
+          return h("button", { class: "person", onclick: () => push(DetailScreen(svc, pe.id, { title: pe.name, poster: pe.photo })) },
+            ph, h("div", { class: "n" }, pe.name), pe.role && h("div", { class: "r" }, pe.role));
+        }))));
+    }
+    for (const r of d.rows || []) if (r.items?.length) kids.push(rowView(r, svc));
+    holder.replaceChildren(...kids);
+  }
+  function actionButton(a, cls) {
+    return h("button", { class: cls, onclick: e => runAction(svc, id, a, it(), reload, e.currentTarget) }, a.label);
+  }
+  const it = () => data?.item || preview || {};
+  function moreActions(list, title) {
+    actionSheet(title, null, list.map((a, i) => ({ label: a.label, value: i, danger: a.style === "danger" || /delete|remove/i.test(a.id) })))
+      .then(i => { if (i != null) runAction(svc, id, list[i], it(), reload); });
+  }
+  function reload(res) {
+    if (res?.close) { pop(); return; }
+    load();
+  }
+  load();
+  return { el: p.el, title: preview?.title || "", refreshIfStale() { if (stale) load(); }, markStale() { stale = true; } };
+}
+
+/** Run one gateway action: confirm / choose first, open screens for "opens", then toast the result. */
+async function runAction(svc, itemId, a, item, after, btn) {
+  if (a.items?.length) {
+    const i = await actionSheet(a.label, null, a.items.map((x, k) => ({ label: x.label, value: k, danger: x.style === "danger" })));
+    if (i != null) return runAction(svc, itemId, a.items[i], item, after, btn);
+    return;
+  }
+  if (a.opens === "releases") { push(ReleasesScreen(svc, itemId, a.arg, item.title, after)); return; }
+  if (a.opens) { toast("That needs the TV app"); return; }
+  let choice = null;
+  if (a.choose?.options?.length) {
+    if (a.choose.options.length === 1) choice = a.choose.options[0].value;
+    else {
+      choice = await actionSheet(a.choose.title || a.label, null, a.choose.options.map(o => ({ label: o.label, value: o.value })));
+      if (choice == null) return;
+    }
+  }
+  if (a.confirm) {
+    const danger = a.style === "danger" || /delete|remove/i.test(a.id);
+    if (!await confirmBox(a.label, a.confirm, a.label, danger)) return;
+  }
+  const label = btn?.textContent;
+  if (btn) { btn.disabled = true; btn.replaceChildren(h("span", { class: "spin small", style: "border-top-color:currentColor" })); }
+  try {
+    const body = { action: a.id };
+    if (a.arg != null) body.arg = a.arg;
+    if (choice != null) body.choice = choice;
+    const r = await post(`${svcPath(svc)}/item/${enc(itemId)}/action`, body);
+    toast(r.message || "Done");
+    markBelowStale();
+    if (r.close || r.refresh !== false) after?.(r);
+  } catch (e) { errToast(e); }
+  finally { if (btn && btn.isConnected) { btn.disabled = false; btn.textContent = label; } }
+}
+function markBelowStale() { for (const s of S.tabs[S.tab].stack) s.markStale?.(); }
+
+function SeasonScreen(svc, itemId, season, showTitle, after) {
+  const p = page({ title: season.label, back: showTitle || "Back" });
+  const kids = [];
+  if (season.subtitle) kids.push(h("div", { class: "section-foot", style: "padding:12px 32px 10px" }, season.subtitle));
+  const acts = season.actions || [];
+  if (acts.length) {
+    kids.push(h("div", { class: "section" }, h("div", { class: "group" }, acts.map(a =>
+      h("button", { class: "cell " + (a.style === "danger" ? "danger" : "tint"), onclick: () => runAction(svc, itemId, a, { title: `${showTitle} – ${season.label}` }, after) },
+        h("div", { class: "main" }, h("div", { class: "t" }, a.label)))))));
+  }
+  const eps = season.episodes || [];
+  if (eps.length) {
+    kids.push(h("div", { class: "section-head" }, "Episodes"), h("div", { class: "section" }, h("div", { class: "group" }, eps.map(ep => {
+      const missing = !ep.hasFile && /missing/i.test(ep.subtitle || "");
+      return h("button", { class: "cell", style: "--inset:44px", onclick: () => episodeActions(ep) },
+        h("span", { class: "dot" + (ep.hasFile ? " on" : missing ? " miss" : "") }),
+        h("div", { class: "main" }, h("div", { class: "t" }, `${ep.label} · ${ep.title}`), ep.subtitle && h("div", { class: "s" }, ep.subtitle)),
+        ep.actions?.length ? svg("more", "mini") : null);
+    }))));
+    kids.push(h("div", { class: "section-foot", style: "margin:-26px 16px 30px" }, "Green: downloaded · Orange: missing · Grey: not aired or not monitored"));
+  }
+  function episodeActions(ep) {
+    if (!ep.actions?.length) return;
+    actionSheet(`${ep.label} · ${ep.title}`, ep.subtitle, ep.actions.map((a, i) => ({ label: a.label, value: i, danger: a.style === "danger" || /delete/i.test(a.id) })))
+      .then(i => { if (i != null) runAction(svc, itemId, ep.actions[i], { title: `${showTitle} ${season.label} ${ep.label}` }, r => { after?.(r); }); });
+  }
+  p.body.append(...kids);
+  return { el: p.el, title: season.label };
+}
+
+// ------------------------------------------------------------------ manual search
+function ReleasesScreen(svc, itemId, arg, title, after) {
+  const p = page({ title: "Manual search", back: "Back" });
+  const status = h("div", { class: "empty" }, h("div", { class: "spin", style: "margin:0 auto 16px" }), h("div", {}, `Asking your indexers for ${title || "releases"}…`),
+    h("div", { style: "font-size:13px;margin-top:6px" }, "This can take a minute."));
+  let all = [], mode = "approved";
+  const seg = h("div", { class: "seg", style: "margin:4px 16px 16px" });
+  const list = h("div", {});
+  function draw() {
+    seg.replaceChildren(...[["approved", `Approved (${all.filter(r => r.approved).length})`], ["all", `All (${all.length})`]].map(([k, l]) =>
+      h("button", { class: mode === k ? "on" : "", onclick: () => { mode = k; draw(); } }, l)));
+    const shown = mode === "approved" ? all.filter(r => r.approved) : all;
+    list.replaceChildren(shown.length ? h("div", { class: "section" }, h("div", { class: "group" }, shown.map(r =>
+      h("button", { class: "cell rel", onclick: () => grab(r) }, h("div", { class: "main" },
+        h("div", { class: "t" }, r.title),
+        h("div", { class: "meta" }, r.quality && h("b", {}, r.quality), h("span", {}, fmtBytes(r.size)), r.protocol && h("span", {}, r.protocol),
+          r.indexer && h("span", {}, r.indexer), r.age && h("span", {}, r.age), r.peers && h("span", {}, r.peers),
+          r.score != null && h("span", {}, `Score ${r.score}`)),
+        (r.rejections || []).length ? h("div", { class: "rej" }, r.rejections.join(" · ")) : null)))))
+      : emptyState(all.length ? "No approved releases" : "Nothing found", all.length ? "Switch to All to see rejected ones." : "Your indexers returned no releases."));
+  }
+  async function grab(r) {
+    const msg = `${r.quality || ""}${r.quality ? " · " : ""}${fmtBytes(r.size)}${r.indexer ? " · " + r.indexer : ""}` +
+      ((r.rejections || []).length ? `\n\nRejected: ${r.rejections.join(", ")}` : "");
+    if (!await confirmBox("Download this release?", msg, "Download")) return;
+    try {
+      const res = await post(`${svcPath(svc)}/item/${enc(itemId)}/grab`, { guid: r.guid, indexerId: r.indexerId });
+      toast(res.message || "Sent to your download client");
+      markBelowStale(); pop(); after?.({});
+    } catch (e) { errToast(e); }
+  }
+  p.body.append(status);
+  get(`${svcPath(svc)}/item/${enc(itemId)}/releases?arg=${enc(arg || "")}`).then(r => {
+    all = r.items || [];
+    if (!all.some(x => x.approved)) mode = "all";
+    status.remove(); p.body.append(seg, list); draw();
+  }).catch(e => status.replaceWith(errorState(e)));
+  return { el: p.el, title: "Manual search" };
+}
+
+// ------------------------------------------------------------------ Downloads
+function DownloadsScreen() {
+  const p = page({ title: "Downloads", large: true });
+  const clientsBox = h("div", { class: "section" }), itemsBox = h("div", {});
+  let timer = null, visible = false, busy = false, last = null;
+  p.body.append(clientsBox, itemsBox, spinner());
+  async function load() {
+    if (busy) return; busy = true;
+    try {
+      const d = await get("/api/downloads");
+      last = d; draw(d);
+    } catch (e) { if (!last) itemsBox.replaceChildren(errorState(e, load)); }
+    finally { busy = false; p.body.querySelector(".spin")?.remove(); }
+  }
+  function draw(d) {
+    clientsBox.replaceChildren(...(d.clients || []).map(c => h("div", { class: "client" },
+      h("div", { class: "main" }, h("div", { class: "t" }, c.name),
+        h("div", { class: "s", style: c.error ? "color:var(--red)" : "" }, c.error || [c.paused ? "Paused" : `${c.count} in queue`, c.seeding ? `${c.seeding} seeding` : ""].filter(Boolean).join(" · "))),
+      !c.error && h("div", { class: "speed" }, c.paused ? "" : fmtSpeed(c.speed)),
+      !c.error && h("button", { class: "btn", style: "flex:0 0 44px;height:44px;padding:0;border-radius:22px", "aria-label": c.paused ? "Resume" : "Pause",
+        onclick: () => send(c.id, null, c.paused ? "resume" : "pause", c.paused ? `Resuming ${c.name}` : `Pausing ${c.name}`) }, svg(c.paused ? "play" : "pause")))));
+    const items = d.items || [];
+    itemsBox.replaceChildren(items.length ? h("div", {}, h("div", { class: "section-head" }, "Queue"),
+      h("div", { class: "section" }, h("div", { class: "group" }, items.map(i => {
+        const pct = Math.round((i.progress || 0) * 100);
+        const done = pct >= 100;
+        const bits = [i.paused ? "Paused" : i.status, done ? fmtBytes(i.size) : `${pct}% of ${fmtBytes(i.size)}`,
+          !i.paused && i.speed ? fmtSpeed(i.speed) : "", !i.paused && i.eta >= 0 && !done ? fmtEta(i.eta) + " left" : ""].filter(Boolean);
+        return h("button", { class: "cell", onclick: () => itemMenu(i) }, h("div", { class: "main" },
+          h("div", { class: "t", style: "font-size:15px;overflow-wrap:anywhere" }, i.name),
+          h("div", { class: "prog" + (i.paused ? " paused" : done ? " done" : "") }, h("i", { style: `width:${pct}%` })),
+          h("div", { class: "s" }, bits.join(" · ")),
+          h("div", { class: "s", style: "color:var(--label-3);margin-top:1px" }, `${i.clientName}${i.category ? " · " + i.category : ""}`)));
+      }))))
+      : emptyState("Nothing downloading", "New downloads from Radarr and Sonarr show up here."));
+  }
+  async function itemMenu(i) {
+    const opts = [i.paused ? { label: "Resume", value: "resume" } : { label: "Pause", value: "pause" }];
+    if (i.canTop) opts.push({ label: "Move to top of queue", value: "top" });
+    opts.push({ label: "Delete", value: "delete", danger: true });
+    if (i.canDeleteFiles) opts.push({ label: "Delete + files", value: "delete_files", danger: true });
+    const a = await actionSheet(i.name, i.clientName, opts);
+    if (!a) return;
+    if (a.startsWith("delete") && !await confirmBox(a === "delete" ? "Delete download?" : "Delete download and files?",
+      a === "delete" ? `Remove “${i.name}” from ${i.clientName}?` : `Remove “${i.name}” and delete its downloaded files? This can't be undone.`, "Delete", true)) return;
+    send(i.client, i.id, a);
+  }
+  async function send(client, id, action, msg) {
+    try {
+      const r = await post("/api/downloads/action", id ? { client, id, action } : { client, action });
+      toast(msg || r.message || "Done"); load();
+    } catch (e) { errToast(e); }
+  }
+  function tick() { if (visible && !document.hidden) load(); }
+  return {
+    el: p.el, title: "Downloads",
+    show() { visible = true; load(); clearInterval(timer); timer = setInterval(tick, 3000); },
+    hide() { visible = false; clearInterval(timer); },
+  };
+}
+
+// ------------------------------------------------------------------ Files (File Station)
+function FilesScreen(path) {
+  const name = path ? path.split("/").filter(Boolean).pop() : "Files";
+  const p = page({ title: name, large: !path, back: path ? prevTitle() : null,
+    right: path ? [h("button", { class: "navbtn", "aria-label": "New folder", onclick: () => newFolder() }, svg("folderPlus"))] : [] });
+  const box = h("div", {});
+  p.body.append(box, spinner());
+  let listing = null;
+  async function load() {
+    try {
+      listing = await get(`/api/files/list?path=${enc(path)}`);
+      draw();
+    } catch (e) { box.replaceChildren(errorState(e, load)); }
+    finally { p.body.querySelector(":scope > .spin")?.remove(); }
+  }
+  function draw() {
+    const items = listing.items || [];
+    if (!items.length) { box.replaceChildren(emptyState(path ? "Empty folder" : "No shared folders", path ? null : "Add one under Settings → File Station.")); return; }
+    box.replaceChildren(h("div", { class: "section" }, h("div", { class: "group" }, items.map(e => {
+      const ic = h("span", { class: "icon", style: `background:none;color:${e.isDir ? "#1ea1f2" : "var(--label-3)"};width:30px` }, svg(e.isDir ? "folder" : "file"));
+      ic.firstChild.style.cssText = "width:28px;height:28px";
+      return h("div", { class: "cell tap", style: "--inset:58px;padding-right:4px" },
+        h("button", { style: "display:flex;align-items:center;gap:12px;flex:1;min-width:0;text-align:left",
+          onclick: () => e.isDir ? push(FilesScreen(e.path)) : entryMenu(e) },
+          ic, h("div", { class: "main" }, h("div", { class: "t" }, e.name),
+            h("div", { class: "s" }, [e.isDir ? "" : fmtBytes(e.size), fmtDate(e.modified)].filter(Boolean).join(" · ")))),
+        path ? h("button", { class: "navbtn", "aria-label": "More", style: "color:var(--label-2)", onclick: () => entryMenu(e) }, svg("more")) : svg("chev"));
+    }))), h("div", { class: "section-foot", style: "margin-top:-26px;text-align:center" }, `${items.length} item${items.length === 1 ? "" : "s"}`));
+  }
+  async function entryMenu(e) {
+    const a = await actionSheet(e.name, e.isDir ? "Folder" : fmtBytes(e.size), [
+      { label: "Rename", value: "rename" }, { label: "Move…", value: "move" }, { label: "Copy…", value: "copy" },
+      { label: "Delete", value: "delete", danger: true }]);
+    if (!a) return;
+    if (a === "rename") {
+      const nn = await promptBox("Rename", null, e.name, "Rename");
+      if (nn && nn !== e.name) op({ op: "rename", path: e.path, name: nn });
+    } else if (a === "delete") {
+      if (await confirmBox(`Delete “${e.name}”?`, e.isDir ? "The folder and everything in it will be deleted from the NAS." : "It will be deleted from the NAS.", "Delete", true))
+        op({ op: "delete", paths: [e.path] });
+    } else {
+      const dest = await pickFolder(a === "move" ? "Move to" : "Copy to", e.path, a === "move" ? "Move here" : "Copy here");
+      if (dest) op({ op: a, paths: [e.path], dest });
+    }
+  }
+  async function newFolder() {
+    const n = await promptBox("New folder", `In ${path}`, "", "Create");
+    if (n) op({ op: "mkdir", path, name: n });
+  }
+  async function op(body) {
+    toast(body.op === "move" ? "Moving…" : body.op === "copy" ? "Copying…" : "Working…");
+    try { const r = await post("/api/files/op", body); toast(r.message || "Done"); load(); }
+    catch (e) { errToast(e); }
+  }
+  load();
+  return { el: p.el, title: name, refreshIfStale: load };
+}
+
+/** Full-screen folder picker for Move/Copy. Resolves the chosen folder path or null. */
+function pickFolder(title, srcPath, okLabel) {
+  return new Promise(resolve => {
+    const srcDir = srcPath.split("/").slice(0, -1).join("/") || "";
+    let cur = srcDir;
+    const titleEl = h("div", { class: "title" }, title);
+    const ok = h("button", { class: "navbtn bold", onclick: () => finish(cur) }, okLabel);
+    const backBtn = h("button", { class: "navbtn back", onclick: () => { const up = cur.split("/").slice(0, -1).join("/"); go(up); } }, svg("back"), "Up");
+    const body = h("div", { class: "mbody" });
+    const m = h("div", { class: "modal" },
+      h("div", { class: "navbar always solid" }, h("div", { class: "left" }, h("button", { class: "navbtn", onclick: () => finish(null) }, "Cancel")), titleEl, h("div", { class: "right" }, ok)),
+      body);
+    document.body.append(m);
+    requestAnimationFrame(() => requestAnimationFrame(() => m.classList.add("show")));
+    function finish(v) { m.classList.remove("show"); setTimeout(() => m.remove(), 360); resolve(v); }
+    async function go(path) {
+      cur = path;
+      ok.disabled = !path || path === srcDir || path === srcPath || path.startsWith(srcPath + "/");
+      body.replaceChildren(h("div", { class: "section-head", style: "padding-top:14px" }, path || "Shared folders"), spinner());
+      try {
+        const l = await get(`/api/files/list?path=${enc(path)}`);
+        if (cur !== path) return;
+        const dirs = (l.items || []).filter(e => e.isDir && e.path !== srcPath);
+        body.replaceChildren(
+          h("div", { class: "section-head", style: "padding-top:14px" }, path || "Shared folders"),
+          h("div", { class: "section" }, h("div", { class: "group" },
+            path ? h("button", { class: "cell tint", onclick: () => go(path.split("/").slice(0, -1).join("/")) }, h("div", { class: "main" }, "‹ Up one level")) : null,
+            dirs.length ? dirs.map(d => h("button", { class: "cell", onclick: () => go(d.path) },
+              h("span", { style: "color:#1ea1f2;display:flex" }, svg("folder")), h("div", { class: "main" }, d.name), svg("chev")))
+              : h("div", { class: "cell" }, h("div", { class: "main", style: "color:var(--label-2)" }, "No folders inside")))),
+          h("div", { class: "section-foot", style: "margin-top:-26px" }, ok.disabled && path === srcDir ? "That's where it already is." : ""));
+        body.querySelectorAll(".cell svg:not(.chev)").forEach(s => { s.style.width = "24px"; s.style.height = "24px"; });
+      } catch (e) { body.replaceChildren(errorState(e)); }
+    }
+    void backBtn;
+    go(srcDir);
+  });
+}
+
+// ------------------------------------------------------------------ Settings
+const SECTION_STYLE = {
+  general: ["#8e8e93", "gear"], radarr: ["#f5b100", "film"], sonarr: ["#2f8fe5", "tv"], seerr: ["#7c5cff", "compass"],
+  nzbget: ["#34c759", "down"], qbittorrent: ["#2f6fdb", "down"], filestation: ["#1ea1f2", "drive"], plex: ["#e5a00d", "film"],
+  tmdb: ["#0dbd8b", "film"],
+};
+function sectionIcon(sec) {
+  const [bg, ic] = SECTION_STYLE[sec] || ["#8e8e93", "gear"];
+  return h("span", { class: "icon", style: `background:${bg}` }, svg(ic));
+}
+let SETTINGS = null;
+async function loadSettings() { SETTINGS = await get("/api/settings"); return SETTINGS; }
+
+function SettingsScreen() {
+  const p = page({ title: "Settings", large: true });
+  const box = h("div", {});
+  p.body.append(box, spinner());
+  async function load() {
+    try { await loadSettings(); draw(); }
+    catch (e) { box.replaceChildren(errorState(e, load)); }
+    finally { p.body.querySelector(":scope > .spin")?.remove(); }
+  }
+  function draw() {
+    const { schema, order, values, writable } = SETTINGS;
+    const kids = [];
+    if (!writable) kids.push(h("div", { class: "banner" }, h("b", {}, "Settings are read-only. "),
+      "In the gateway's docker-compose.yml change ", h("code", {}, "./config:/config:ro"), " to ", h("code", {}, "./config:/config"),
+      ", then rebuild the project in Container Manager."));
+    const services = order.filter(s => schema[s].multi);
+    kids.push(h("div", { class: "section-head" }, "Services"), h("div", { class: "section" }, h("div", { class: "group" },
+      services.flatMap(sec => {
+        const list = values[sec] || [];
+        const rows = list.map((e, i) => h("button", { class: "cell", style: "--inset:57px", onclick: () => push(EditScreen(sec, i)) },
+          sectionIcon(sec), h("div", { class: "main nowrap" }, h("div", { class: "t" }, e.name || schema[sec].title), h("div", { class: "s" }, e.url || "No address")), svg("chev")));
+        const canAdd = !schema[sec].max || list.length < schema[sec].max;
+        if (canAdd) rows.push(h("button", { class: "cell tint", style: "--inset:57px", onclick: () => push(EditScreen(sec, -1)) },
+          h("span", { class: "icon", style: "background:var(--fill);color:var(--tint)" }, svg("plus")), h("div", { class: "main" }, `Add ${schema[sec].title}`)));
+        return rows;
+      }))));
+    const singles = order.filter(s => schema[s].single && s !== "general");
+    kids.push(h("div", { class: "section-head" }, "NAS & extras"), h("div", { class: "section" }, h("div", { class: "group" },
+      singles.map(sec => h("button", { class: "cell", style: "--inset:57px", onclick: () => push(EditScreen(sec, 0)) },
+        sectionIcon(sec), h("div", { class: "main nowrap" }, h("div", { class: "t" }, schema[sec].title),
+          h("div", { class: "s" }, values[sec] ? (values[sec].url || (values[sec]._set?.length ? "Set" : "")) || "Set" : "Not set up")), svg("chev"))))));
+    kids.push(h("div", { class: "section-head" }, "Harbour"), h("div", { class: "section" }, h("div", { class: "group" },
+      h("button", { class: "cell", style: "--inset:57px", onclick: () => push(EditScreen("general", 0)) }, sectionIcon("general"),
+        h("div", { class: "main" }, h("div", { class: "t" }, "General"), h("div", { class: "s" }, "Name, region, TV access token")), svg("chev")),
+      h("button", { class: "cell", style: "--inset:57px", onclick: () => push(PasswordScreen()) },
+        h("span", { class: "icon", style: "background:#636366" }, svg("key")), h("div", { class: "main" }, "Change password"), svg("chev"))),
+      h("div", { class: "section-foot" }, `Harbour gateway ${S.config?.version || ""}`)));
+    kids.push(h("div", { class: "section" }, h("div", { class: "group" },
+      h("button", { class: "cell center danger", onclick: signOut }, "Sign out"))));
+    box.replaceChildren(...kids);
+  }
+  load();
+  return { el: p.el, title: "Settings", refreshIfStale: () => SETTINGS && draw() };
+}
+
+/** Edit one service entry (index -1 = new). Saving sends every section back; blank secrets mean "keep". */
+function EditScreen(sec, index) {
+  const sch = SETTINGS.schema[sec];
+  const isNew = index < 0 || (sch.single && !SETTINGS.values[sec]);
+  const src = sch.multi ? (index >= 0 ? SETTINGS.values[sec][index] : {}) : (SETTINGS.values[sec] || {});
+  const entry = JSON.parse(JSON.stringify(src || {}));
+  const title = sch.multi ? (isNew ? `New ${sch.title}` : (entry.name || sch.title)) : sch.title;
+  const saveBtn = h("button", { class: "navbtn bold", onclick: () => save() }, "Save");
+  const p = page({ title, back: "Settings", right: [saveBtn] });
+  const inputs = {};
+  const testOut = h("div", {});
+  const fields = sch.fields.map(f => {
+    const v = entry[f.key];
+    if (f.type === "bool") {
+      const inp = h("input", { type: "checkbox" }); inp.checked = v ?? f.default ?? false;
+      inputs[f.key] = () => inp.checked;
+      return h("label", { class: "cell" }, h("div", { class: "main" }, f.label), h("span", { class: "switch" }, inp, h("span", {})));
+    }
+    if (f.type === "choice") {
+      let val = v || "";
+      const seg = h("div", { class: "seg", style: "flex:0 0 auto;min-width:150px" });
+      const draw = () => seg.replaceChildren(...f.options.map((o, i) => h("button", { class: o === val ? "on" : "", onclick: () => { val = o; draw(); } }, f.labels?.[i] || o || "Default")));
+      draw(); inputs[f.key] = () => val;
+      return h("div", { class: "cell" }, h("div", { class: "main" }, f.label), seg);
+    }
+    const isSecret = f.type === "secret", has = (entry._set || []).includes(f.key);
+    const inp = h("input", {
+      type: isSecret ? "password" : f.type === "url" ? "url" : "text", value: isSecret ? "" : (v ?? ""),
+      placeholder: isSecret ? (has ? "Saved — leave blank to keep" : (f.required ? "Required" : "Optional")) : (f.placeholder || ""),
+      autocapitalize: "off", autocorrect: "off", spellcheck: "false", autocomplete: isSecret ? "new-password" : "off",
+      inputmode: f.type === "url" ? "url" : null,
+    });
+    if (isSecret) {
+      const eye = h("button", { class: "navbtn", style: "height:24px;padding:0 0 0 8px;font-size:15px;flex:none;max-width:none", onclick: e => { e.preventDefault(); inp.type = inp.type === "password" ? "text" : "password"; eye.textContent = inp.type === "password" ? "Show" : "Hide"; } }, "Show");
+      inputs[f.key] = () => inp.value.trim();
+      return h("label", { class: "field" }, h("div", { class: "lbl" }, f.label), h("div", { style: "display:flex;align-items:center" }, inp, eye), f.help && h("div", { class: "help" }, f.help));
+    }
+    inputs[f.key] = () => inp.value.trim();
+    return h("label", { class: "field" }, h("div", { class: "lbl" }, f.label), inp, f.help && h("div", { class: "help" }, f.help));
+  });
+  const kids = [h("div", { class: "section", style: "margin-top:12px" }, h("div", { class: "group" }, fields))];
+  if (sch.test) kids.push(h("div", { class: "section" }, h("div", { class: "group" }, h("button", { class: "cell tint center", onclick: test }, "Test connection")), testOut));
+  if (!isNew && (sch.multi || sch.optional)) kids.push(h("div", { class: "section" }, h("div", { class: "group" },
+    h("button", { class: "cell center danger", onclick: remove }, sch.multi ? `Remove ${entry.name || sch.title}` : `Turn off ${sch.title}`))));
+  if (sec === "general") kids.push(h("div", { class: "section-foot", style: "margin:-20px 16px 0" },
+    "The TV access token is what your Fire TV apps send on your home network. Changing it means updating it on the TV too."));
+  p.body.append(...kids);
+
+  function collect() {
+    const out = { ...(entry.id ? { id: entry.id } : {}) };
+    for (const f of sch.fields) out[f.key] = inputs[f.key]();
+    return out;
+  }
+  async function test() {
+    testOut.replaceChildren(h("div", { class: "testres" }, h("span", { class: "spin small" }), "  Testing…"));
+    try {
+      const r = await post("/api/settings/test", { section: sec, entry: collect() });
+      testOut.replaceChildren(h("div", { class: "testres " + (r.ok ? "ok" : "bad") }, (r.ok ? "✓ " : "✕ ") + r.message));
+    } catch (e) { testOut.replaceChildren(h("div", { class: "testres bad" }, "✕ " + e.message)); }
+  }
+  function valuesWith(mutate) {
+    const vals = JSON.parse(JSON.stringify(SETTINGS.values));
+    for (const s of Object.keys(vals)) {                 // never send the "_set" markers back
+      const strip = e => { if (e) delete e._set; return e; };
+      vals[s] = Array.isArray(vals[s]) ? vals[s].map(strip) : strip(vals[s]);
+    }
+    mutate(vals);
+    return vals;
+  }
+  async function put(vals, msg) {
+    saveBtn.disabled = true;
+    try {
+      await api("PUT", "/api/settings", { values: vals });
+      toast(msg);
+      await afterSettingsChange();
+      pop();
+    } catch (e) { errToast(e); }
+    finally { saveBtn.disabled = false; }
+  }
+  function save() {
+    const e = collect();
+    put(valuesWith(v => {
+      if (sch.multi) { v[sec] = v[sec] || []; if (index >= 0) v[sec][index] = e; else v[sec].push(e); }
+      else v[sec] = e;
+    }), "Saved");
+  }
+  async function remove() {
+    const what = entry.name || sch.title;
+    if (!await confirmBox(sch.multi ? `Remove ${what}?` : `Turn off ${sch.title}?`,
+      "Harbour will stop using it. Nothing changes in the service itself.", sch.multi ? "Remove" : "Turn off", true)) return;
+    put(valuesWith(v => { if (sch.multi) v[sec].splice(index, 1); else v[sec] = null; }), `${what} removed`);
+  }
+  return { el: p.el, title };
+}
+
+function PasswordScreen() {
+  const btn = h("button", { class: "navbtn bold", onclick: () => go() }, "Save");
+  const p = page({ title: "Change password", back: "Settings", right: [btn] });
+  const cur = h("input", { type: "password", autocomplete: "current-password", placeholder: "Required" });
+  const nw = h("input", { type: "password", autocomplete: "new-password", placeholder: "At least 8 characters" });
+  const nw2 = h("input", { type: "password", autocomplete: "new-password", placeholder: "Repeat it" });
+  p.body.append(h("div", { class: "section", style: "margin-top:12px" }, h("div", { class: "group" },
+    h("label", { class: "field" }, h("div", { class: "lbl" }, "Current password"), cur),
+    h("label", { class: "field" }, h("div", { class: "lbl" }, "New password"), nw),
+    h("label", { class: "field" }, h("div", { class: "lbl" }, "Confirm new password"), nw2)),
+    h("div", { class: "section-foot" }, "Every other phone signed in to Harbour will be signed out.")));
+  async function go() {
+    if (nw.value !== nw2.value) return toast("The new passwords don't match", true);
+    btn.disabled = true;
+    try { const r = await post("/api/login/password", { current: cur.value, new: nw.value }); toast(r.message || "Password changed"); pop(); }
+    catch (e) { errToast(e); }
+    finally { btn.disabled = false; }
+  }
+  return { el: p.el, title: "Change password" };
+}
+
+async function afterSettingsChange() {
+  await loadSettings();
+  const old = JSON.stringify((S.config?.services || []).map(s => [s.kind, s.inst, s.name])) + S.config?.files + S.config?.downloads;
+  S.config = await get("/api/config");
+  const now = JSON.stringify(S.config.services.map(s => [s.kind, s.inst, s.name])) + S.config.files + S.config.downloads;
+  if (old !== now) {                       // services changed: rebuild the other tabs, keep Settings where it is
+    const keep = S.tabs.settings;
+    for (const [id, t] of Object.entries(S.tabs)) if (id !== "settings") { t.stack.forEach(s => s.destroy?.()); t.el.remove(); }
+    const bar = $("#tabbar"); bar.innerHTML = "";
+    const app = $("#app");
+    const visible = TABS.filter(t => t.show());
+    S.tabs = {};
+    for (const t of visible) {
+      if (t.id === "settings") { S.tabs.settings = keep; app.append(keep.el); }
+      else { const el = h("div", { class: "tab hidden", "data-tab": t.id }); app.insertBefore(el, keep.el); S.tabs[t.id] = { el, stack: [], def: t }; }
+      bar.append(h("button", { "data-tab": t.id, class: t.id === "settings" ? "on" : "", onclick: () => selectTab(t.id) }, svg(t.icon), t.label));
+    }
+  }
+  for (const s of S.tabs.settings.stack) s.refreshIfStale?.();
+}
+
+async function signOut() {
+  if (!await confirmBox("Sign out?", "You'll need the Harbour password to sign back in.", "Sign out", true)) return;
+  try { await post("/api/logout"); } catch (e) { /* signed out anyway */ }
+  location.reload();
+}
+
+// ------------------------------------------------------------------ login / first-run setup
+function showLogin(status) {
+  const box = $("#login");
+  if (!box.classList.contains("hidden") && !status) return;
+  $("#tabbar").classList.add("hidden");
+  box.classList.remove("hidden");
+  const setup = status ? status.setup_needed : false;
+  const name = status?.name || "Harbour";
+  const err = h("div", { class: "err" });
+  const token = h("input", { type: "password", inputmode: "numeric", autocomplete: "off", placeholder: "Code from your TV app" });
+  const pw = h("input", { type: "password", autocomplete: setup ? "new-password" : "current-password", placeholder: setup ? "At least 8 characters" : "Password" });
+  const pw2 = h("input", { type: "password", autocomplete: "new-password", placeholder: "Repeat it" });
+  const btn = h("button", { class: "btn primary", onclick: () => go() }, setup ? "Set password" : "Sign in");
+  const form = h("form", { onsubmit: e => { e.preventDefault(); go(); } },
+    h("div", { class: "section" }, h("div", { class: "group" },
+      setup && h("label", { class: "field" }, h("div", { class: "lbl" }, "TV access token"), token),
+      h("label", { class: "field" }, h("div", { class: "lbl" }, setup ? "New password" : "Password"), pw),
+      setup && h("label", { class: "field" }, h("div", { class: "lbl" }, "Confirm password"), pw2))),
+    err, btn, h("input", { type: "submit", class: "hidden" }));
+  box.replaceChildren(
+    h("div", { class: "logo" }, h("img", { src: "/m/icon-180.png", alt: "" })),
+    h("h1", {}, setup ? "Set up Harbour" : name),
+    h("p", {}, setup ? "Prove it's you with the access token your Fire TV app uses, then choose a password for this phone and any others."
+      : "Sign in to manage your NAS."),
+    form);
+  setTimeout(() => (setup ? token : pw).focus(), 300);
+  async function go() {
+    err.textContent = "";
+    if (setup && pw.value !== pw2.value) { err.textContent = "The passwords don't match"; return; }
+    btn.disabled = true; btn.textContent = setup ? "Saving…" : "Signing in…";
+    try {
+      if (setup) await post("/api/login/setup", { token: token.value.trim(), password: pw.value });
+      else await post("/api/login", { password: pw.value });
+      box.classList.add("hidden");
+      start();
+    } catch (e) {
+      err.textContent = e.message; btn.disabled = false; btn.textContent = setup ? "Set password" : "Sign in";
+    }
+  }
+}
+
+// ------------------------------------------------------------------ start
+async function start() {
+  let st;
+  try { st = await get("/api/login/status"); }
+  catch (e) { $("#app").replaceChildren(emptyState("Can't reach Harbour", e.message, () => location.reload())); return; }
+  if (!st.signed_in) {
+    // On the home network the gateway may still let us in without a password (no password set yet,
+    // and no token configured); otherwise show sign-in or first-run setup.
+    try { if (st.setup_needed) throw 0; S.config = await get("/api/config"); }
+    catch (e) { showLogin(st); return; }
+  }
+  try { S.config = S.config || await get("/api/config"); }
+  catch (e) { if (!(e instanceof NeedLogin)) $("#app").replaceChildren(emptyState("Can't reach Harbour", e.message, () => location.reload())); return; }
+  buildTabs();
+}
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden && S.tabs[S.tab]) topOf(S.tabs[S.tab])?.show?.();
+});
+start();
+</script>
+</body>
+</html>

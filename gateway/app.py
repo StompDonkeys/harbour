@@ -29,7 +29,7 @@ from urllib.parse import quote, urlsplit
 import requests
 from flask import Flask, Response, has_request_context, jsonify, request, stream_with_context
 
-VERSION = "0.4.0"
+VERSION = "0.5.0"
 CONFIG_PATH = os.environ.get("HARBOUR_CONFIG", "/config/config.json")
 TMDB_IMG = "https://image.tmdb.org/t/p/"
 
@@ -3116,18 +3116,16 @@ def warm_loop():
         time.sleep(240)
 
 
-PUBLIC = ("/", "/apk", "/Harbour.apk", "/HarbourV2.apk")
+import web_access  # noqa: E402  (iPhone web app: login, settings, /m)
+
+WEB = web_access.install(app, get_cfg=lambda: CFG, config_path=CONFIG_PATH, reload=lambda: init(),
+                         ApiError=ApiError, NzbGet=NzbGet, QBittorrent=QBittorrent, FileStation=FileStation)
 
 
 @app.before_request
 def check_token():
-    if request.path.lower() in [p.lower() for p in PUBLIC]:
-        return None
-    token = CFG.get("token") or ""
-    given = request.headers.get("X-Token") or request.args.get("t") or ""
-    if token and not hmac.compare_digest(token, given):
-        return jsonify(error="Wrong access token — check Harbour's settings"), 401
-    return None
+    """LAN requests: the access token, as before. Through the reverse proxy: a web-app login."""
+    return WEB["check_access"]()
 
 
 @app.errorhandler(ApiError)
@@ -3152,6 +3150,9 @@ def on_error(e):
 
 @app.get("/")
 def root():
+    to_app = web_access.browser_home()
+    if to_app:
+        return to_app
     return jsonify(name="Harbour gateway", version=VERSION, ok=True)
 
 

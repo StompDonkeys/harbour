@@ -27,6 +27,8 @@ The stick only knows the gateway's address and one token. The gateway is a singl
 | **Files** | Browse shared folders; ☰ Menu on any item for Move to…, Copy to…, Rename, Delete; New folder. |
 | **Settings** | Gateway address + token, and **in-app updates** from GitHub releases. |
 
+There's also an **iPhone app** served by the gateway itself — see [iPhone app](#iphone-app-web-app).
+
 Menu names come from the `name` of each service in `config.json`.
 
 **Remote:** D-pad moves, OK selects, Back goes up/back (and from a tab's first screen, jumps to the menu), ☰ opens options in Files.
@@ -63,9 +65,27 @@ Menu names come from the `name` of each service in `config.json`.
 
    That page only checks the gateway started and read your config. To check a service's API key, swap the address for one service's page, e.g. `http://192.168.4.68:8765/api/svc/radarr/radarr/home?t=YOUR_TOKEN`. A long block of movie data means the key works; an error message names the service that failed.
 
-**Changing settings later.** The gateway reads `config.json` once, when it starts. If you change anything in it afterwards — a new password, an API key, adding a service — restart the project in Container Manager (**Action → Restart**) so it picks up the change. No rebuild needed.
+**Changing settings later.** Easiest from the iPhone app: *Settings* edits every address, API key and password, with a **Test connection** button per service, and the gateway reloads instantly. Editing `config.json` by hand still works — restart the project in Container Manager (**Action → Restart**) afterwards. The config folder must be writable by `dockerlimited` for in-app saving (the compose file no longer mounts it `:ro`).
 
-**Keep it on your home network.** Don't add it to the DSM reverse proxy or forward port 8765 on your eero. Anyone who can reach it with the token can delete files on the NAS.
+**Away from home.** Only the iPhone web app (below) is meant to go through the DSM reverse proxy — it signs in with a password. Requests that arrive through the proxy don't accept the TV token at all (unless you set `"remote_token": true`), so the Fire TV apps stay home-network only. Never forward port 8765 on the eero directly.
+
+## iPhone app (web app)
+
+The gateway also serves an iPhone app at `/m/` — same features as the TV app (Radarr, Radarr 4K, Sonarr, Jellyseerr, manual search, per-episode actions, Downloads, Files) plus a **Settings** tab for every service's address and API key. Nothing to install from the App Store and nothing to re-sign.
+
+1. **Update the gateway.** Copy the new `gateway/` folder (`app.py`, `web_access.py`, `web/`, `Dockerfile`, `docker-compose.yml`) over `/volume1/docker/harbour-gateway/`, keeping your `config/` folder. In Container Manager: project → **Action → Build**, then start it. The Fire TV apps keep working unchanged.
+2. **Make the config folder writable** by `dockerlimited` (File Station → right-click `harbour-gateway/config` → Properties → Permission → `dockerlimited` Read & Write).
+3. **First run (at home).** On the iPhone, open `http://192.168.4.68:8765/` in Safari. Enter your TV access token once, then pick a password (8+ characters). That password is what every phone uses from then on.
+4. **Add to Home Screen.** Safari → Share → *Add to Home Screen*. It opens full-screen with the Harbour icon.
+5. **Away from home.** DSM → Control Panel → Login Portal → Advanced → Reverse Proxy → Create:
+   - Source: `HTTPS`, hostname `harbour.plexstation.synology.me`, port `443`
+   - Destination: `HTTP`, `localhost`, port `8765`
+   - Security → Certificate: make sure the certificate covers `*.plexstation.synology.me` and assign it to this entry.
+   - **Check it:** open `https://harbour.plexstation.synology.me/api/login/status` — it must say `"remote":true`. That's what tells the gateway to insist on the password and refuse the TV token. If it says `false`, add custom headers on the proxy entry (Custom Header → Create): `X-Forwarded-For` = `$proxy_add_x_forwarded_for`, then check again.
+
+   Then open `https://harbour.plexstation.synology.me` on the phone, sign in, and add *that* one to the Home Screen (delete the home-network one) — it works at home and away.
+
+**Security notes.** The password is stored hashed in `config.json` (`"web"` section). Sign-ins last 180 days per phone; *Settings → Change password* signs out every other phone. Five wrong passwords in 15 minutes locks sign-in for 15 minutes. API keys and passwords are never sent back to the phone — Settings only shows whether each one is set.
 
 ## 2. Build the APK with GitHub Actions
 

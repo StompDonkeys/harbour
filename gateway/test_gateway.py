@@ -1007,3 +1007,141 @@ def test_recording_saved_to_nas(client):
     assert b'name="path"\r\n\r\n/video/Harbour recordings\r\n' in b and b'filename="Demo 1.mp4"' in b
     assert video in b and got["ct"].startswith("multipart/form-data; boundary=")
     assert b.index(b'name="create_parents"') < b.index(b'name="file"')
+
+
+# ---------------------------------------------------------------- iPhone web app: login + settings
+
+REMOTE = {"Host": "harbour.example.com", "X-Forwarded-For": "203.0.113.9"}
+
+
+@pytest.fixture
+def web(client):
+    """Each web test starts from the original config and puts it back afterwards."""
+    with open(gw.CONFIG_PATH) as f:
+        orig = f.read()
+    yield client
+    with open(gw.CONFIG_PATH, "w") as f:
+        f.write(orig)
+    gw.init()
+
+
+def _setup(c, pw="harbour-pass"):
+    return c.post("/api/login/setup", json={"token": "tok", "password": pw}, headers=REMOTE)
+
+
+def test_web_remote_needs_login_and_lan_token_still_works(web):
+    assert web.get("/api/config", headers=H).status_code == 200          # LAN + token: unchanged
+    r = web.get("/api/config", headers={**H, **REMOTE})                 # remote: token isn't enough
+    assert r.status_code == 401 and r.get_json()["login"] is True
+    assert web.get("/api/login/status", headers=REMOTE).get_json()["setup_needed"] is True
+    assert web.get("/m/", headers=REMOTE).status_code == 200            # app shell is public
+    # browsers hitting / land in the app; the JSON hello is unchanged otherwise
+    assert web.get("/", headers={"Accept": "text/html"}).status_code == 302
+    assert web.get("/").get_json()["ok"] is True
+
+
+def test_web_setup_login_session_and_csrf(web):
+    assert web.post("/api/login/setup", json={"token": "nope", "password": "harbour-pass"},
+                    headers=REMOTE).status_code == 401
+    assert _setup(web, "short").status_code == 400
+    r = _setup(web)
+    assert r.status_code == 200 and "HttpOnly" in r.headers["Set-Cookie"] and "Secure" in r.headers["Set-Cookie"]
+    with open(gw.CONFIG_PATH) as f:
+        saved = json.load(f)
+    assert saved["web"]["password"] != "harbour-pass" and saved["radarr"][0]["api_key"] == "rk"
+    assert web.get("/api/config", headers=REMOTE).status_code == 200   # cookie session
+    # unsafe requests with the cookie need the app's header
+    assert web.post("/api/reload", headers=REMOTE).status_code == 403
+    assert web.post("/api/reload", headers={**REMOTE, "X-Harbour-Web": "1"}).status_code == 200
+    assert _setup(web).status_code == 409                               # only once
+    web.post("/api/logout", headers={**REMOTE, "X-Harbour-Web": "1"})
+    assert web.get("/api/config", headers=REMOTE).status_code == 401
+    assert web.post("/api/login", json={"password": "harbour-pass"}, headers=REMOTE).status_code == 200
+    assert web.get("/api/config", headers=REMOTE).status_code == 200
+
+
+def test_web_login_rate_limited(web, monkeypatch):
+    monkeypatch.setattr(web_time := __import__("web_access").time, "sleep", lambda s: None)
+    _setup(web)
+    web.post("/api/logout", headers={**REMOTE, "X-Harbour-Web": "1"})
+    hdr = {**REMOTE, "X-Forwarded-For": "198.51.100.7"}
+    codes = [web.post("/api/login", json={"password": "wrong"}, headers=hdr).status_code for _ in range(6)]
+    assert codes[:5] == [401] * 5 and codes[5] == 429
+    assert web.post("/api/login", json={"password": "harbour-pass"}, headers=hdr).status_code == 429
+
+
+def test_web_password_change_signs_out_others(web):
+    _setup(web)
+    other = gw.app.test_client()
+    other.post("/api/login", json={"password": "harbour-pass"}, headers=REMOTE)
+    assert other.get("/api/config", headers=REMOTE).status_code == 200
+    r = web.post("/api/login/password", json={"current": "harbour-pass", "new": "new-password-1"},
+                 headers={**REMOTE, "X-Harbour-Web": "1"})
+    assert r.status_code == 200
+    assert web.get("/api/config", headers=REMOTE).status_code == 200
+    assert other.get("/api/config", headers=REMOTE).status_code == 401
+
+
+def test_web_settings_masked_and_saved(web):
+    s = web.get("/api/settings", headers=H).get_json()
+    r0 = s["values"]["radarr"][0]
+    assert r0["api_key"] == "" and r0["_set"] == ["api_key"] and r0["id"] == "radarr"
+    assert s["values"]["filestation"]["allowed_shares"] == "/video, /downloads"
+    assert "\"rk\"" not in json.dumps(s["values"]) and "admintok" not in json.dumps(s["values"])
+
+    vals = s["values"]
+    vals["radarr"][0]["url"] = "192.168.4.68:7878/"                    # scheme added, slash dropped
+    vals["radarr"].append({"name": "Radarr Anime", "url": "http://nas:7880", "api_key": "rk-anime"})
+    vals["sonarr"] = []                                                   # removed
+    vals["filestation"]["allowed_shares"] = "data, /video/"
+    r = web.put("/api/settings", json={"values": vals}, headers=H)
+    assert r.status_code == 200, r.data
+    with open(gw.CONFIG_PATH) as f:
+        c = json.load(f)
+    assert c["radarr"][0] == {"id": "radarr", "name": "Movies", "url": "http://192.168.4.68:7878", "api_key": "rk"}
+    assert c["radarr"][2]["id"] == "radarr-anime" and c["radarr"][2]["api_key"] == "rk-anime"
+    assert c["radarr"][1]["icon"] == "4k" and c["radarr"][1]["api_key"] == "rk4"
+    assert "sonarr" not in c and c["filestation"]["allowed_shares"] == ["/data", "/video"]
+    assert c["seerr"]["four_k"] is True and c["seerr"]["api_key"] == "ok"   # unknown keys + shape kept
+    assert c["filestation"]["password"] == "p" and c["plex"]["token"] == "admintok"
+    insts = [x["inst"] for x in web.get("/api/config", headers=H).get_json()["services"]]
+    assert "radarr-anime" in insts and "sonarr" not in insts              # reloaded live
+
+
+def test_web_settings_validation_and_rollback(web):
+    vals = web.get("/api/settings", headers=H).get_json()["values"]
+    vals["radarr"].append({"name": "No key", "url": "http://nas:1"})
+    r = web.put("/api/settings", json={"values": vals}, headers=H)
+    assert r.status_code == 400 and "API key" in r.get_json()["error"]
+    with open(gw.CONFIG_PATH) as f:
+        assert len(json.load(f)["radarr"]) == 2                           # untouched
+
+
+@responses.activate
+def test_web_settings_connection_tests(web):
+    responses.get("http://nas:7878/api/v3/system/status", json={"appName": "Radarr", "version": "5.9"},
+                  match=[responses.matchers.header_matcher({"X-Api-Key": "rk"})])
+    r = web.post("/api/settings/test", json={"section": "radarr",
+                                             "entry": {"id": "radarr", "name": "Movies", "url": "http://nas:7878", "api_key": ""}},
+                 headers=H).get_json()
+    assert r == {"ok": True, "message": "Connected to Radarr 5.9"}         # saved key used when left blank
+    responses.get("http://nas:9999/api/v3/system/status", status=401)
+    r = web.post("/api/settings/test", json={"section": "sonarr",
+                                             "entry": {"name": "x", "url": "http://nas:9999", "api_key": "bad"}},
+                 headers=H).get_json()
+    assert r["ok"] is False and "rejected" in r["message"]
+    r = web.post("/api/settings/test", json={"section": "sonarr",
+                                             "entry": {"name": "x", "url": "http://nas:1", "api_key": "k"}},
+                 headers=H).get_json()
+    assert r["ok"] is False and "connect" in r["message"].lower()
+
+
+def test_web_rate_limit_ignores_spoofed_forwarded_for(web, monkeypatch):
+    monkeypatch.setattr(__import__("web_access").time, "sleep", lambda s: None)
+    _setup(web)
+    web.post("/api/logout", headers={**REMOTE, "X-Harbour-Web": "1"})
+    # attacker varies the first X-Forwarded-For entry; the proxy appends the real address last
+    codes = [web.post("/api/login", json={"password": "x"},
+                      headers={"Host": "harbour.example.com", "X-Forwarded-For": f"10.0.0.{n}, 198.51.100.50"}).status_code
+             for n in range(6)]
+    assert codes[5] == 429
