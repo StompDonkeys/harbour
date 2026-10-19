@@ -63,7 +63,9 @@ Make sure your Docker user has **Read/Write** on that folder (File Station → f
 
 ## iPhone app
 
-The gateway also serves an iPhone app at `/m/`: Library (Radarr, Radarr 4K, Sonarr), Discover (Jellyseerr requests), Calendar, Downloads, Files and Settings, with manual search, per-episode actions and trailers. **Settings** edits every service's address and API key (with **Test connection**), and saving takes effect straight away for the TVs too. Nothing to install from the App Store.
+The gateway also serves an iPhone app at `/m/`: Library (Radarr, Radarr 4K, Sonarr), Discover (Jellyseerr requests), Calendar, Downloads, Files and Settings, with manual search, per-episode actions and trailers.
+
+**X / Twitter videos:** Downloads → *X / Twitter video*. Paste a post link (e.g. `https://x.com/user/status/123…?s=46`), tap **Get sizes**, pick one, and the gateway downloads it and saves it to `/data/media/twitter` on the NAS (`/volume1/data/media/twitter`) through File Station, named `handle date postid 720p.mp4`. It needs File Station set up, and the File Station user needs write access there. Change the folder with `"twitter": {"folder": "/data/media/twitter"}` in the gateway config. For posts X only shows to signed-in accounts, export your x.com cookies (Netscape `cookies.txt`) to the gateway's config folder and add `"cookies": "/config/x-cookies.txt"` to that block. **Settings** edits every service's address and API key (with **Test connection**), and saving takes effect straight away for the TVs too. Nothing to install from the App Store.
 
 1. **At home**, open `http://<your NAS>:8765/` in Safari (it opens the app once the gateway is set up). Enter your **gateway PIN** once, then choose a password (8+ characters). Every phone uses that password from then on.
 2. **Add to Home Screen:** Safari → Share → *Add to Home Screen*. It opens full screen with the Harbour icon.

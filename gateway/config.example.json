@@ -41,5 +41,7 @@
     "password": "DOCKERLIMITED_DSM_PASSWORD",
     "allowed_shares": ["/data"],
     "verify_ssl": true
-  }
+  },
+
+  "twitter": { "folder": "/data/media/twitter" }
 }

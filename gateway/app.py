@@ -2944,6 +2944,212 @@ def yt_update_loop():
         time.sleep(86400)
 
 
+# ---------------------------------------------------------------- X / Twitter video downloads
+#
+# Paste a post link (x.com or twitter.com) on the iPhone app's Downloads page: the gateway asks
+# yt-dlp which sizes the video comes in, then downloads the one you pick and saves it on the NAS
+# through File Station (default /data/media/twitter, i.e. /volume1/data/media/twitter).
+# Only X's single-file MP4 renditions are offered, so no ffmpeg is needed in the image.
+
+X_URL = re.compile(r"^https?://(?:www\.|mobile\.)?(x\.com|twitter\.com|fxtwitter\.com|vxtwitter\.com|fixupx\.com|"
+                   r"fixvx\.com)/([A-Za-z0-9_]{1,30}|i(?:/web)?)/status(?:es)?/(\d{5,25})", re.I)
+X_POOL = ThreadPoolExecutor(max_workers=2)
+_X_JOBS = {}            # job id -> dict (newest last)
+_X_LOOKUPS = {}         # tweet id -> (time, yt-dlp info)
+_X_LOCK = threading.Lock()
+
+
+def x_conf():
+    c = CFG.get("twitter") or {}
+    return c if isinstance(c, dict) else {}
+
+
+def x_folder():
+    return (x_conf().get("folder") or "/data/media/twitter").rstrip("/")
+
+
+def x_available():
+    import importlib.util
+    return FILES is not None and (os.path.isdir(os.path.join(YT_DIR, "yt_dlp"))
+                                  or importlib.util.find_spec("yt_dlp") is not None)
+
+
+def x_parse(url):
+    m = X_URL.match((url or "").strip())
+    if not m:
+        raise ApiError("That doesn't look like an X post link (x.com/…/status/…)")
+    user = "i" if m.group(2).lower().startswith("i/") else m.group(2)
+    return m.group(3), f"https://x.com/{user}/status/{m.group(3)}"
+
+
+def _x_cmd(*args):
+    cmd = [sys.executable, "-m", "yt_dlp", "--no-warnings", "--no-progress" if "-J" in args else "--newline"]
+    cookies = x_conf().get("cookies")
+    if cookies and os.path.isfile(cookies):
+        cmd += ["--cookies", cookies]
+    return cmd + list(args)
+
+
+def _x_err(stderr):
+    last = [ln for ln in (stderr or "").strip().splitlines() if ln.strip()][-1:]
+    msg = last[0] if last else "lookup failed"
+    msg = re.sub(r"^ERROR:\s*(\[\w+\]\s*\d*:?\s*)?", "", msg)
+    if re.search(r"No video could be found", msg, re.I):
+        return "That post doesn't have a video"
+    if re.search(r"login|authenticat|NSFW|age.restrict|protected", msg, re.I):
+        return "X needs a signed-in account for this post (add a cookies file in the gateway config)"
+    return f"X: {msg[:200]}"
+
+
+def _x_options(entry):
+    """The single-file MP4 sizes X offers for one video, biggest first."""
+    dur = entry.get("duration") or 0
+    seen, out = set(), []
+    for f in entry.get("formats") or []:
+        if not str(f.get("format_id", "")).startswith("http") or f.get("ext") not in (None, "mp4"):
+            continue
+        w, hgt = f.get("width"), f.get("height")
+        if not hgt:
+            m = re.search(r"/(\d{2,4})x(\d{2,4})/", f.get("url") or "")
+            if m:
+                w, hgt = int(m.group(1)), int(m.group(2))
+        key = (w, hgt)
+        if key in seen:
+            continue
+        seen.add(key)
+        size = f.get("filesize") or f.get("filesize_approx") or \
+            (int(f["tbr"] * 1000 / 8 * dur) if f.get("tbr") and dur else None)
+        out.append({"format": f["format_id"], "width": w, "height": hgt, "size": size})
+    out.sort(key=lambda o: ((o["height"] or 0) * (o["width"] or 0), o["size"] or 0), reverse=True)
+    for o in out:
+        short = min(o["width"] or 0, o["height"] or 0)
+        o["label"] = f'{o["width"]}×{o["height"]}' if o["height"] else "Original"
+        o["quality"] = "Full HD" if short >= 1000 else "HD" if short >= 700 else "SD" if short >= 400 else "Small"
+    if not out:   # nothing progressive: let yt-dlp pick the best single file
+        out.append({"format": "b", "label": "Best available", "quality": "", "size": None,
+                    "width": entry.get("width"), "height": entry.get("height")})
+    return out
+
+
+def x_lookup(url):
+    tid, url = x_parse(url)
+    hit = _X_LOOKUPS.get(tid)
+    if hit and time.time() - hit[0] < 1800:
+        info = hit[1]
+    else:
+        try:
+            p = subprocess.run(_x_cmd("-J", url), capture_output=True, text=True, timeout=90, env=_yt_env())
+        except subprocess.TimeoutExpired:
+            raise ApiError("X took too long to answer", 504)
+        if p.returncode != 0:
+            raise ApiError(_x_err(p.stderr), 502)
+        try:
+            info = json.loads(p.stdout)
+        except ValueError:
+            raise ApiError("X: unreadable answer", 502)
+        _X_LOOKUPS[tid] = (time.time(), info)
+        if len(_X_LOOKUPS) > 100:
+            for k in sorted(_X_LOOKUPS, key=lambda k: _X_LOOKUPS[k][0])[:50]:
+                _X_LOOKUPS.pop(k, None)
+    entries = [e for e in (info.get("entries") or [info]) if e]
+    first = entries[0] if entries else info
+    videos = [{"index": i + 1, "duration": e.get("duration"), "thumbnail": e.get("thumbnail"),
+               "options": _x_options(e)} for i, e in enumerate(entries)]
+    text = (first.get("description") or info.get("description") or first.get("title") or "").strip()
+    text = re.sub(r"\s*https://t\.co/\w+\s*$", "", text)
+    return {"id": tid, "url": url, "text": text[:400],
+            "author": first.get("uploader") or info.get("uploader"),
+            "handle": first.get("uploader_id") or info.get("uploader_id"),
+            "date": first.get("upload_date") or info.get("upload_date"),
+            "videos": videos, "folder": x_folder()}
+
+
+def _x_name(meta, index, count, height):
+    handle = re.sub(r"[^\w-]", "", meta.get("handle") or "x") or "x"
+    d = meta.get("date") or ""
+    day = f"{d[:4]}-{d[4:6]}-{d[6:8]}" if len(d) == 8 else datetime.now().strftime("%Y-%m-%d")
+    part = f" ({index} of {count})" if count > 1 else ""
+    size = f" {height}p" if height else ""
+    return f"{handle} {day} {meta['id']}{part}{size}.mp4"
+
+
+def _x_run(job):
+    import shutil
+    import tempfile
+    tmp = tempfile.mkdtemp(prefix="harbour-x-", dir=os.environ.get("TMPDIR", "/tmp"))
+    try:
+        args = ["-f", job["format"], "-o", os.path.join(tmp, "video.%(ext)s"), "--no-mtime"]
+        if job["count"] > 1:
+            args += ["--playlist-items", str(job["index"])]
+        else:
+            args += ["--no-playlist"]
+        proc = subprocess.Popen(_x_cmd(*args, job["url"]), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                text=True, env=_yt_env())
+        job["status"] = "downloading"
+        for line in proc.stdout:
+            m = re.search(r"\[download\]\s+([\d.]+)%", line)
+            if m:
+                job["progress"] = min(float(m.group(1)) / 100 * 0.9, 0.9)
+        err = proc.stderr.read()
+        if proc.wait(timeout=1800) != 0:
+            raise ApiError(_x_err(err), 502)
+        files_ = [os.path.join(tmp, f) for f in os.listdir(tmp) if not f.endswith(".part")]
+        if not files_:
+            raise ApiError("yt-dlp didn't produce a file", 502)
+        src = max(files_, key=os.path.getsize)
+        job["size"] = os.path.getsize(src)
+        job["status"], job["progress"] = "saving", 0.92
+        job["path"] = FILES.upload(job["folder"], job["name"], src)
+        job["status"], job["progress"] = "done", 1.0
+        log.info("saved X video %s (%s)", job["path"], fmt_size(job["size"]))
+    except requests.RequestException:
+        job["status"], job["error"] = "failed", "Couldn't reach File Station on the NAS to save the video"
+        log.warning("X download %s: File Station unreachable", job["url"])
+    except Exception as e:
+        job["status"], job["error"] = "failed", getattr(e, "message", None) or str(e)
+        log.warning("X download %s failed: %s", job["url"], job["error"])
+    finally:
+        job["finished"] = time.time()
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def x_download(url, index=1, fmt=None):
+    if not x_available():
+        raise ApiError("X downloads need File Station set up on the gateway", 404)
+    meta = x_lookup(url)
+    vids = meta["videos"]
+    try:
+        index = int(index or 1)
+    except (TypeError, ValueError):
+        raise ApiError("Bad video number")
+    if not 1 <= index <= len(vids):
+        raise ApiError("That post doesn't have that many videos")
+    opt = next((o for o in vids[index - 1]["options"] if o["format"] == fmt), None)
+    if not opt:
+        raise ApiError("That size isn't available any more — look the post up again")
+    job = {"id": secrets.token_hex(6), "url": meta["url"], "tweet": meta["id"], "index": index,
+           "count": len(vids), "format": opt["format"], "label": opt["label"], "quality": opt["quality"],
+           "author": meta.get("author"), "handle": meta.get("handle"), "text": meta.get("text"),
+           "thumbnail": vids[index - 1].get("thumbnail"), "folder": x_folder(),
+           "name": _x_name(meta, index, len(vids), opt.get("height")),
+           "status": "queued", "progress": 0.0, "size": opt.get("size"), "started": time.time()}
+    FILES.check(job["folder"])   # fail now, not after the download, if the folder isn't allowed
+    with _X_LOCK:
+        _X_JOBS[job["id"]] = job
+        while len(_X_JOBS) > 30:
+            old = next((k for k, j in _X_JOBS.items() if j.get("finished")), None)
+            if not old:
+                break
+            _X_JOBS.pop(old)
+    X_POOL.submit(_x_run, job)
+    return {"job": job, "message": f"Downloading to {job['folder']}"}
+
+
+def x_jobs():
+    with _X_LOCK:
+        return {"jobs": list(reversed(list(_X_JOBS.values()))), "folder": x_folder()}
+
+
 
 # ---------------------------------------------------------------- Indexer search
 #
@@ -3877,6 +4083,7 @@ def config():
                    dashboard=HUB is not None,
                    trailers=trailers_available(),
                    indexers=bool(CFG.get("prowlarr") or CFG.get("newznab")),
+                   xdl=x_available(),
                    gatewayUpdate=gateway_update(),
                    repo=CFG.get("github_repo") or DEFAULT_REPO)
 
@@ -4216,6 +4423,24 @@ def downloads_action():
     if not c:
         raise ApiError("Unknown download client", 404)
     return jsonify(c.act(b.get("id"), b.get("action")))
+
+
+@app.post("/api/x/lookup")
+def x_lookup_route():
+    if not x_available():
+        raise ApiError("X downloads need File Station set up on the gateway", 404)
+    return jsonify(x_lookup((request.get_json(silent=True) or {}).get("url")))
+
+
+@app.post("/api/x/download")
+def x_download_route():
+    b = request.get_json(silent=True) or {}
+    return jsonify(x_download(b.get("url"), b.get("index"), b.get("format")))
+
+
+@app.get("/api/x/jobs")
+def x_jobs_route():
+    return jsonify(x_jobs())
 
 
 init()

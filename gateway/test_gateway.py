@@ -1330,3 +1330,67 @@ def test_web_v3_device_keys_and_remote_setup(web):
     _setup(web)
     assert web.get("/setup", headers=REMOTE).status_code == 200                                 # signed in → ok
     gw.CFG.pop("devices", None)
+
+
+FAKE_YTDLP = r'''
+import json, os, sys
+a = sys.argv[1:]
+url = a[-1]
+if "/status/404" in url:
+    print("ERROR: [twitter] 404: No video could be found in this tweet", file=sys.stderr); sys.exit(1)
+fmts = [{"format_id": "hls-832", "ext": "mp4", "url": "https://video.twimg.com/x.m3u8", "height": 720, "width": 1280},
+        {"format_id": "http-256", "ext": "mp4", "tbr": 256, "url": "https://video.twimg.com/ext_tw_video/1/pu/vid/480x270/a.mp4"},
+        {"format_id": "http-2176", "ext": "mp4", "tbr": 2176, "url": "https://video.twimg.com/ext_tw_video/1/pu/vid/1280x720/b.mp4"},
+        {"format_id": "http-832", "ext": "mp4", "tbr": 832, "url": "https://video.twimg.com/ext_tw_video/1/pu/vid/640x360/c.mp4"}]
+if "-J" in a:
+    print(json.dumps({"id": "2111925739440202230", "uploader": "Liam", "uploader_id": "liam_out_loud",
+                      "upload_date": "20261018", "description": "Look at this https://t.co/abc", "duration": 20,
+                      "thumbnail": "https://pbs.twimg.com/t.jpg", "formats": fmts}))
+else:
+    assert a[a.index("-f") + 1] == "http-2176", a
+    out = a[a.index("-o") + 1].replace("%(ext)s", "mp4")
+    for p in (10, 55.5, 100):
+        print(f"[download]  {p}% of 5.00MiB at 1MiB/s ETA 00:01", flush=True)
+    open(out, "wb").write(b"\0" * 1234)
+'''
+
+
+def test_x_download(client, monkeypatch, tmp_path):
+    import time as _t
+    (tmp_path / "yt_dlp").mkdir()
+    (tmp_path / "yt_dlp" / "__init__.py").write_text("")
+    (tmp_path / "yt_dlp" / "__main__.py").write_text(FAKE_YTDLP)
+    monkeypatch.setattr(gw, "YT_DIR", str(tmp_path))
+    monkeypatch.setitem(gw.CFG, "twitter", {"folder": "/downloads/twitter"})
+    saved = {}
+
+    def fake_upload(folder, name, src):
+        saved.update(folder=folder, name=name, size=os.path.getsize(src))
+        return f"{folder}/{name}"
+    monkeypatch.setattr(gw.FILES, "upload", fake_upload)
+
+    assert client.get("/api/config", headers=H).get_json()["xdl"] is True
+    bad = client.post("/api/x/lookup", headers=H, json={"url": "https://example.com/a/status/1"})
+    assert bad.status_code == 400
+    none = client.post("/api/x/lookup", headers=H, json={"url": "https://x.com/a/status/40400000404"})
+    assert none.status_code == 400 or "video" in none.get_json()["error"]
+
+    r = client.post("/api/x/lookup", headers=H,
+                    json={"url": "https://x.com/liam_out_loud/status/2111925739440202230?s=46"}).get_json()
+    assert r["url"] == "https://x.com/liam_out_loud/status/2111925739440202230"
+    assert r["handle"] == "liam_out_loud" and r["text"] == "Look at this"
+    opts = r["videos"][0]["options"]
+    assert [o["label"] for o in opts] == ["1280×720", "640×360", "480×270"]      # HLS left out, biggest first
+    assert opts[0]["quality"] == "HD" and opts[0]["size"] == 2176 * 1000 // 8 * 20
+
+    j = client.post("/api/x/download", headers=H, json={"url": r["url"], "index": 1, "format": "http-2176"}).get_json()["job"]
+    for _ in range(100):
+        job = next(x for x in client.get("/api/x/jobs", headers=H).get_json()["jobs"] if x["id"] == j["id"])
+        if job["status"] in ("done", "failed"):
+            break
+        _t.sleep(0.1)
+    assert job["status"] == "done", job
+    assert saved == {"folder": "/downloads/twitter", "name": "liam_out_loud 2026-10-18 2111925739440202230 720p.mp4",
+                     "size": 1234}
+    stale = client.post("/api/x/download", headers=H, json={"url": r["url"], "format": "http-9999"})
+    assert stale.status_code == 400

@@ -518,7 +518,7 @@ const TABS = [
   { id: "library", split: true, label: "Home", icon: "tabHome", root: () => LibraryScreen(), show: () => arrServices().length > 0 },
   { id: "discover", split: true, label: "Discover", icon: "tabDiscover", root: () => DiscoverScreen(), show: () => !!seerrService() },
   { id: "calendar", split: true, label: "Calendar", icon: "tabCalendar", root: () => CalendarScreen(), show: () => !!S.config?.calendar },
-  { id: "downloads", label: "Downloads", icon: "tabDownloads", root: () => DownloadsScreen(), show: () => !!(S.config?.downloads || S.config?.indexers) },
+  { id: "downloads", label: "Downloads", icon: "tabDownloads", root: () => DownloadsScreen(), show: () => !!(S.config?.downloads || S.config?.indexers || S.config?.xdl) },
   { id: "files", split: true, label: "Files", icon: "tabFiles", root: () => FilesScreen(""), show: () => !!S.config?.files },
   { id: "settings", split: true, label: "Settings", icon: "tabSettings", root: () => SettingsScreen(), show: () => true },
 ];
@@ -1252,11 +1252,16 @@ function DownloadsScreen() {
     right: idx ? [h("button", { class: "navbtn", "aria-label": "Search indexers", onclick: () => push(IndexerScreen()) }, svg("search"))] : [] });
   const clientsBox = h("div", { class: "section" }), itemsBox = h("div", {});
   let timer = null, visible = false, busy = false, last = null;
-  if (idx) p.body.append(h("div", { class: "section" }, h("div", { class: "group" },
-    h("button", { class: "cell", style: "--inset:57px", onclick: () => push(IndexerScreen()) },
-      h("span", { class: "icon", style: "background:#5e5ce6" }, svg("search")),
-      h("div", { class: "main" }, h("div", { class: "t" }, "Search indexers"), h("div", { class: "s" }, "Usenet and torrents, straight to your download client")),
-      svg("chev")))));
+  const tools = [];
+  if (idx) tools.push(h("button", { class: "cell", style: "--inset:57px", onclick: () => push(IndexerScreen()) },
+    h("span", { class: "icon", style: "background:#5e5ce6" }, svg("search")),
+    h("div", { class: "main" }, h("div", { class: "t" }, "Search indexers"), h("div", { class: "s" }, "Usenet and torrents, straight to your download client")),
+    svg("chev")));
+  if (S.config?.xdl) tools.push(h("button", { class: "cell", style: "--inset:57px", onclick: () => push(XScreen()) },
+    h("span", { class: "icon", style: "background:#000;color:#1d9bf0" }, svg("down")),
+    h("div", { class: "main" }, h("div", { class: "t" }, "X / Twitter video"), h("div", { class: "s" }, "Paste a post link, pick a size, save it to the NAS")),
+    svg("chev")));
+  if (tools.length) p.body.append(h("div", { class: "section" }, h("div", { class: "group" }, tools)));
   p.body.append(clientsBox, itemsBox, spinner());
   async function load() {
     if (!S.config?.downloads) { p.body.querySelector(":scope > .spin")?.remove(); return; }
@@ -1378,6 +1383,93 @@ function IndexerScreen() {
   setTimeout(() => input.focus(), 350);
   return { el: p.el, title: "Search indexers" };
 }
+
+// ------------------------------------------------------------------ X / Twitter video downloads
+function XScreen() {
+  const p = page({ title: "X video", back: "Downloads" });
+  let meta = null, jobs = [], timer = null, visible = false, seq = 0;
+  const input = h("input", { type: "url", placeholder: "Paste an x.com post link", autocapitalize: "off", autocorrect: "off",
+    enterkeyhint: "go", inputmode: "url" });
+  const form = h("form", { class: "search", onsubmit: e => { e.preventDefault(); input.blur(); lookup(); } }, svg("search"), input);
+  const buttons = h("div", { style: "display:flex;gap:10px;margin:10px 16px 22px" },
+    navigator.clipboard?.readText && h("button", { class: "btn", type: "button", style: "flex:1", onclick: paste }, "Paste"),
+    h("button", { class: "btn primary", type: "button", style: "flex:1", onclick: () => { input.blur(); lookup(); } }, "Get sizes"));
+  const out = h("div", {}), jobsBox = h("div", {});
+  const folderFoot = () => `Saved to ${meta?.folder || S.xFolder || "/data/media/twitter"} on the NAS.`;
+
+  async function paste() {
+    try { const t = (await navigator.clipboard.readText() || "").trim(); if (t) { input.value = t; lookup(); } }
+    catch { toast("Couldn't read the clipboard — long-press the box and paste", true); }
+  }
+  async function lookup() {
+    const url = input.value.trim();
+    if (!url) { input.focus(); return; }
+    const n = ++seq;
+    out.replaceChildren(h("div", { class: "empty" }, h("div", { class: "spin", style: "margin:0 auto 16px" }), "Asking X for the video…"));
+    try {
+      const r = await post("/api/x/lookup", { url });
+      if (n !== seq) return;
+      meta = r; draw();
+    } catch (e) { if (n === seq) out.replaceChildren(emptyState("Couldn't get that video", e.message)); }
+  }
+  function draw() {
+    const many = meta.videos.length > 1;
+    const head = h("div", { class: "section" }, h("div", { class: "group" }, h("div", { class: "cell", style: "align-items:flex-start;padding-top:12px;padding-bottom:12px" },
+      meta.videos[0]?.thumbnail && h("img", { src: meta.videos[0].thumbnail, alt: "", referrerpolicy: "no-referrer",
+        style: "width:96px;height:96px;object-fit:cover;border-radius:8px;flex:none;background:var(--fill)" }),
+      h("div", { class: "main", style: "padding:0" },
+        h("div", { class: "t", style: "font-weight:600" }, meta.author || "X post"),
+        meta.handle && h("div", { class: "s" }, "@" + meta.handle),
+        meta.text && h("div", { style: "font-size:14px;margin-top:6px;line-height:1.35;overflow-wrap:anywhere;display:-webkit-box;-webkit-line-clamp:4;-webkit-box-orient:vertical;overflow:hidden" }, meta.text)))));
+    const vids = meta.videos.map(v => h("div", {},
+      h("div", { class: "section-head" }, many ? `Video ${v.index} of ${meta.videos.length}${v.duration ? " · " + fmtDur(v.duration) : ""}`
+        : `Choose a size${v.duration ? " · " + fmtDur(v.duration) : ""}`),
+      h("div", { class: "section" }, h("div", { class: "group" }, v.options.map(o =>
+        h("button", { class: "cell", onclick: () => start(v, o) },
+          h("div", { class: "main" }, h("div", { class: "t" }, o.label),
+            h("div", { class: "s" }, [o.quality, o.size ? "about " + fmtBytes(o.size) : ""].filter(Boolean).join(" · ") || "MP4")),
+          h("span", { class: "mini", style: "color:var(--tint);display:grid" }, svg("down"))))),
+        h("div", { class: "section-foot" }, folderFoot()))));
+    out.replaceChildren(head, ...vids);
+  }
+  async function start(v, o) {
+    try {
+      const r = await post("/api/x/download", { url: meta.url, index: v.index, format: o.format });
+      toast(`Downloading ${o.label}`);
+      jobs = [r.job, ...jobs.filter(j => j.id !== r.job.id)]; drawJobs(); poll();
+    } catch (e) { errToast(e); }
+  }
+  const STATUS = { queued: "Waiting", downloading: "Downloading", saving: "Saving to NAS", done: "Saved", failed: "Failed" };
+  function drawJobs() {
+    if (!jobs.length) { jobsBox.replaceChildren(); return; }
+    jobsBox.replaceChildren(h("div", { class: "section-head" }, "Recent"), h("div", { class: "section" }, h("div", { class: "group" }, jobs.map(j => {
+      const pct = Math.round((j.progress || 0) * 100), done = j.status === "done", bad = j.status === "failed";
+      return h("div", { class: "cell" }, h("div", { class: "main" },
+        h("div", { class: "t", style: "font-size:15px;overflow-wrap:anywhere" }, j.name),
+        !done && !bad && h("div", { class: "prog" }, h("i", { style: `width:${pct}%` })),
+        h("div", { class: "s", style: bad ? "color:var(--red);white-space:normal" : "" },
+          bad ? j.error : [STATUS[j.status] || j.status, done ? fmtBytes(j.size) : j.status === "downloading" ? pct + "%" : ""].filter(Boolean).join(" · "))));
+    }))));
+  }
+  async function loadJobs() {
+    try { const r = await get("/api/x/jobs"); jobs = r.jobs || []; S.xFolder = r.folder; drawJobs(); } catch { /* keep what we have */ }
+  }
+  function poll() {
+    clearInterval(timer);
+    timer = setInterval(async () => {
+      if (!visible || document.hidden) return;
+      await loadJobs();
+      if (!jobs.some(j => !["done", "failed"].includes(j.status))) clearInterval(timer);
+    }, 1500);
+  }
+  p.body.append(h("div", { style: "padding-top:8px" }, form), buttons, out, jobsBox);
+  return {
+    el: p.el, title: "X video",
+    async show() { visible = true; await loadJobs(); if (jobs.some(j => !["done", "failed"].includes(j.status))) poll(); if (!input.value) setTimeout(() => input.focus(), 350); },
+    hide() { visible = false; clearInterval(timer); },
+  };
+}
+const fmtDur = s => { s = Math.round(s); return s >= 3600 ? `${Math.floor(s / 3600)}:${String(Math.floor(s % 3600 / 60)).padStart(2, "0")}:${String(s % 60).padStart(2, "0")}` : `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`; };
 
 // ------------------------------------------------------------------ Files (File Station)
 function FilesScreen(path) {
@@ -1655,9 +1747,9 @@ function PasswordScreen() {
 
 async function afterSettingsChange() {
   await loadSettings();
-  const old = JSON.stringify((S.config?.services || []).map(s => [s.kind, s.inst, s.name])) + S.config?.files + S.config?.downloads;
+  const old = JSON.stringify((S.config?.services || []).map(s => [s.kind, s.inst, s.name])) + S.config?.files + S.config?.downloads + S.config?.xdl;
   S.config = await get("/api/config");
-  const now = JSON.stringify(S.config.services.map(s => [s.kind, s.inst, s.name])) + S.config.files + S.config.downloads;
+  const now = JSON.stringify(S.config.services.map(s => [s.kind, s.inst, s.name])) + S.config.files + S.config.downloads + S.config.xdl;
   if (old !== now) {                       // services changed: rebuild the other tabs, keep Settings where it is
     const keep = S.tabs.settings;
     for (const [id, t] of Object.entries(S.tabs)) if (id !== "settings") { t.stack.forEach(s => s.destroy?.()); t.el.remove(); }
