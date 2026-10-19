@@ -1,15 +1,15 @@
-# Container Manager → Project → Create → point "Path" at this folder
-# (e.g. /volume1/docker/harbour-gateway) and it will build from the Dockerfile.
+# Harbour V3 gateway — Synology Container Manager → Project → Create → paste this.
+# Then open http://<your NAS>:8765/setup in a browser to set it up.
 services:
   harbour-gateway:
-    build: .
-    image: harbour-gateway:latest
+    image: ghcr.io/stompdonkeys/harbour-gateway:latest
     container_name: harbour-gateway
-    user: "1035:100"   # dockerlimited, same as the rest of your stack
+    user: "1035:100"            # your Docker user (dockerlimited); change if yours differs
     restart: unless-stopped
     ports:
       - "8765:8765"
     volumes:
-      - ./config:/config:ro
+      - ./config:/config            # settings saved from the setup page
+      - /volume1/docker:/stack:ro   # optional: lets the setup page find your apps' API keys
     environment:
       - TZ=Australia/Sydney

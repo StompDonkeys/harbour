@@ -1,0 +1,67 @@
+name: Build Harbour gateway image
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "gateway/**"
+      - ".github/workflows/build-gateway.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  packages: write
+
+env:
+  IMAGE: ghcr.io/stompdonkeys/harbour-gateway
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      VERSION: 3.0.${{ github.run_number }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Tests
+        working-directory: gateway
+        run: |
+          pip install -q flask requests pytest responses
+          pytest -q test_gateway.py
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: gateway
+          platforms: linux/amd64,linux/arm64
+          push: true
+          build-args: VERSION=${{ env.VERSION }}
+          tags: |
+            ${{ env.IMAGE }}:latest
+            ${{ env.IMAGE }}:${{ env.VERSION }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.title=Harbour gateway
+            org.opencontainers.image.version=${{ env.VERSION }}
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: gateway-v${{ env.VERSION }}
+          name: Harbour gateway ${{ env.VERSION }}
+          make_latest: false
+          body: |
+            Docker image: `${{ env.IMAGE }}:${{ env.VERSION }}` (also `:latest`).
+            Update in Synology Container Manager: Image → harbour-gateway → Update.

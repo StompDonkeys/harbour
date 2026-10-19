@@ -18,6 +18,7 @@ import os
 import posixpath
 import re
 import random
+import secrets
 import subprocess
 import sys
 import threading
@@ -30,7 +31,7 @@ from urllib.parse import quote, urlsplit
 import requests
 from flask import Flask, Response, has_request_context, jsonify, request, stream_with_context
 
-VERSION = "0.4.0"
+VERSION = os.environ.get("HARBOUR_VERSION") or "3.0.0-dev"
 CONFIG_PATH = os.environ.get("HARBOUR_CONFIG", "/config/config.json")
 TMDB_IMG = "https://image.tmdb.org/t/p/"
 
@@ -3163,6 +3164,322 @@ def indexer_grab(rid, target):
     return {"message": f"Sent to {c.name} ✓"}
 
 
+
+# ---------------------------------------------------------------- V3: setup page, pairing, auto-detect
+#
+# Everything you used to do by editing config.json now happens at http://<nas>:8765/setup:
+# enter (or auto-detect) each app's address and key, test it, save. TVs and phones pair from
+# there too, so nobody types API keys on a remote.
+
+STACK_DIR = os.environ.get("HARBOUR_STACK_DIR", "/stack")
+_PAIRS = {}            # pairing id -> {...}
+_PAIR_LOCK = threading.Lock()
+SETUP_HTML_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "setup.html")
+
+
+def save_config(new):
+    """Write config.json atomically (and privately), then reload everything."""
+    os.makedirs(os.path.dirname(CONFIG_PATH) or ".", exist_ok=True)
+    tmp = CONFIG_PATH + ".tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(new, f, indent=2, ensure_ascii=False)
+        try:
+            os.chmod(tmp, 0o600)
+        except OSError:
+            pass
+        os.replace(tmp, CONFIG_PATH)
+    except OSError as e:
+        raise ApiError(f"Couldn't save settings ({e.strerror}). The gateway's config folder must be writable: in "
+                       f"docker-compose use ./config:/config (not :ro), and give your Docker user Read/Write on "
+                       f"that folder in File Station.", 500)
+    init()
+
+
+def normalise_config(c):
+    """Tidy what the setup page sends: drop empty sections, give every Radarr/Sonarr a unique id."""
+    def filled(d):
+        return isinstance(d, dict) and bool((d.get("url") or "").strip())
+
+    for key in ("radarr", "sonarr", "newznab", "seerr", "nzbget", "qbittorrent"):
+        v = c.get(key)
+        if isinstance(v, list):
+            v = [x for x in v if filled(x)]
+            if v:
+                c[key] = v
+            else:
+                c.pop(key, None)
+        elif v is not None and not filled(v):
+            c.pop(key, None)
+    for key in ("plex", "prowlarr", "filestation"):
+        if key in c and not filled(c[key]):
+            c.pop(key)
+    if isinstance(c.get("tmdb"), dict) and not (c["tmdb"].get("api_key") or "").strip():
+        c.pop("tmdb")
+    for key in ("radarr", "sonarr"):
+        used = set()
+        for i, x in enumerate(c.get(key) or []):
+            base = re.sub(r"[^a-z0-9]+", "-", (x.get("id") or x.get("name") or key).lower()).strip("-") or key
+            ident, n = base, 2
+            while ident in used:
+                ident, n = f"{base}-{n}", n + 1
+            used.add(ident)
+            x["id"] = ident
+            x.setdefault("name", key.title() if i == 0 else f"{key.title()} {i + 1}")
+            for k in ("url",):
+                x[k] = x[k].strip().rstrip("/")
+    fs = c.get("filestation")
+    if isinstance(fs, dict) and isinstance(fs.get("allowed_shares"), str):
+        fs["allowed_shares"] = [x.strip() for x in fs["allowed_shares"].split(",") if x.strip()]
+    return c
+
+
+def setup_cookie_value():
+    token = CFG.get("token") or ""
+    return hmac.new(token.encode(), b"harbour-setup", hashlib.sha256).hexdigest()
+
+
+def setup_authed():
+    if not CFG.get("token"):
+        return True  # first run: nothing to protect yet
+    given = request.headers.get("X-Token") or ""
+    if given and valid_token(given):
+        return True
+    return hmac.compare_digest(request.cookies.get("hb_setup", ""), setup_cookie_value())
+
+
+def valid_token(given):
+    token = CFG.get("token") or ""
+    if token and hmac.compare_digest(token, given):
+        return True
+    return any(hmac.compare_digest(d.get("token", ""), given) for d in CFG.get("devices") or [] if d.get("token"))
+
+
+# -- version / updates
+def version_tuple(v):
+    return tuple(int(x) for x in re.findall(r"\d+", v or "")[:3]) or (0,)
+
+
+def gateway_update():
+    """Newest published gateway (GitHub release gateway-v*), if newer than this one. Cached 6h."""
+    hit = _UPDATE_CACHE.get("gw")
+    if hit and time.time() - hit[0] < 6 * 3600:
+        return hit[1]
+    repo = CFG.get("github_repo") or DEFAULT_REPO
+    newest = None
+    try:
+        rels = requests.get(f"https://api.github.com/repos/{repo}/releases", params={"per_page": 50}, timeout=10).json()
+        tags = [r.get("tag_name", "") for r in rels if str(r.get("tag_name", "")).startswith("gateway-v")]
+        if tags:
+            best = max(tags, key=lambda t: version_tuple(t))
+            if version_tuple(best) > version_tuple(VERSION) and "dev" not in VERSION:
+                newest = best.removeprefix("gateway-v")
+    except (requests.RequestException, ValueError, AttributeError):
+        pass
+    _UPDATE_CACHE["gw"] = (time.time(), newest)
+    return newest
+
+
+_UPDATE_CACHE = {}
+
+
+# -- pairing: a TV asks, you approve it on the setup page, it gets its own token
+def pair_start(name):
+    pid = secrets.token_urlsafe(18)
+    code = f"{secrets.randbelow(9000) + 1000}"
+    with _PAIR_LOCK:
+        for k in [k for k, p in _PAIRS.items() if time.time() - p["at"] > 900]:
+            _PAIRS.pop(k, None)
+        _PAIRS[pid] = {"id": pid, "code": code, "name": (name or "Harbour device")[:60], "at": time.time(),
+                       "status": "pending", "token": None, "ip": request.remote_addr}
+    return {"id": pid, "code": code, "expires": 600}
+
+
+def pair_status(pid):
+    with _PAIR_LOCK:
+        p = _PAIRS.get(pid)
+        if not p:
+            return {"status": "expired"}
+        if p["status"] == "pending" and time.time() - p["at"] > 600:
+            p["status"] = "expired"
+        out = {"status": p["status"]}
+        if p["status"] == "approved" and p["token"]:
+            out["token"] = p["token"]
+            p["token"] = None  # hand it over once
+            _PAIRS.pop(pid, None)
+        return out
+
+
+def pair_decide(pid, approve):
+    with _PAIR_LOCK:
+        p = _PAIRS.get(pid)
+        if not p or p["status"] != "pending":
+            raise ApiError("That request has gone — ask the TV to start pairing again", 404)
+        if not approve:
+            p["status"] = "denied"
+            return {"ok": True}
+        token = secrets.token_urlsafe(24)
+        p["status"], p["token"] = "approved", token
+    new = json.loads(json.dumps(CFG))
+    new.setdefault("devices", []).append({"name": p["name"], "token": token,
+                                          "added": datetime.now().astimezone().isoformat(timespec="minutes")})
+    save_config(new)
+    return {"ok": True}
+
+
+# -- auto-detect: read API keys straight from the apps' own config files
+SKIP_DIRS = {"cache", "Cache", "logs", "Logs", "MediaCover", "Backups", "backups", "Metadata", "Media", "Codecs",
+             "Crash Reports", "Plug-in Support", "Sentry", "transcode", "Transcode", "Diagnostics", "Drivers",
+             "Updates", "node_modules", "db", "Scanners", "Plug-ins", "asp", "logs.db"}
+
+
+def _xml_val(text, tag):
+    m = re.search(rf"<{tag}>([^<]*)</{tag}>", text)
+    return m.group(1).strip() if m else None
+
+
+def detect_apps(host):
+    """Walk the mounted docker folder for Radarr/Sonarr/Prowlarr (config.xml), Jellyseerr (settings.json),
+    Plex (Preferences.xml), NZBGet (nzbget.conf) and qBittorrent (qBittorrent.conf), then check each
+    answers on this NAS."""
+    if not os.path.isdir(STACK_DIR):
+        return {"mounted": False, "found": []}
+    found, seen_files = [], 0
+    for root, dirs, files in os.walk(STACK_DIR):
+        depth = root[len(STACK_DIR):].count(os.sep)
+        dirs[:] = [d for d in dirs if d not in SKIP_DIRS and not d.startswith(".")] if depth < 6 else []
+        seen_files += len(files)
+        if seen_files > 60000:
+            break
+        rel = os.path.relpath(root, STACK_DIR)
+        top = rel.split(os.sep)[0] if rel != "." else ""
+        for fn in files:
+            path = os.path.join(root, fn)
+            try:
+                if fn == "config.xml":
+                    txt = open(path, encoding="utf-8", errors="ignore").read(20000)
+                    key, port = _xml_val(txt, "ApiKey"), _xml_val(txt, "Port")
+                    if not key or not port:
+                        continue
+                    inst = (_xml_val(txt, "InstanceName") or top or "").strip()
+                    low = (inst + " " + top).lower()
+                    kind = next((k for k in ("radarr", "sonarr", "prowlarr", "lidarr", "readarr", "whisparr")
+                                 if k in low), None)
+                    if kind not in ("radarr", "sonarr", "prowlarr"):
+                        continue
+                    base = (_xml_val(txt, "UrlBase") or "").strip().rstrip("/")
+                    if base and not base.startswith("/"):
+                        base = "/" + base
+                    found.append({"kind": kind, "id": re.sub(r"[^a-z0-9-]", "-", (top or kind).lower()),
+                                  "name": inst or top or kind.title(),
+                                  "url": f"http://{host}:{port}{base}", "api_key": key, "source": rel})
+                elif fn == "settings.json" and ("seerr" in rel.lower() or "overseerr" in rel.lower()):
+                    d = json.load(open(path, encoding="utf-8"))
+                    key = ((d.get("main") or {}).get("apiKey"))
+                    if key:
+                        found.append({"kind": "seerr", "id": "seerr",
+                                      "name": "Jellyseerr" if "jelly" in rel.lower() else "Overseerr",
+                                      "url": f"http://{host}:5055", "api_key": key, "source": rel})
+                elif fn == "Preferences.xml" and "plex" in rel.lower():
+                    txt = open(path, encoding="utf-8", errors="ignore").read(20000)
+                    m = re.search(r'PlexOnlineToken="([^"]+)"', txt)
+                    if m:
+                        found.append({"kind": "plex", "id": "plex", "name": "Plex",
+                                      "url": f"http://{host}:32400", "token": m.group(1), "source": rel})
+                elif fn == "nzbget.conf":
+                    txt = open(path, encoding="utf-8", errors="ignore").read(200000)
+                    def conf(k):
+                        m = re.search(rf"^{k}=(.*)$", txt, re.M)
+                        return m.group(1).strip() if m else ""
+                    found.append({"kind": "nzbget", "id": "nzbget", "name": "NZBGet",
+                                  "url": f"http://{host}:{conf('ControlPort') or 6789}",
+                                  "username": conf("ControlUsername"), "password": conf("ControlPassword"),
+                                  "source": rel})
+                elif fn == "qBittorrent.conf":
+                    txt = open(path, encoding="utf-8", errors="ignore").read(100000)
+                    m = re.search(r"^WebUI\\\\Port=(\d+)", txt, re.M)
+                    found.append({"kind": "qbittorrent", "id": "qbittorrent", "name": "qBittorrent",
+                                  "url": f"http://{host}:{m.group(1) if m else 8080}", "source": rel,
+                                  "note": "Add its API key (qBittorrent 5.2+) or username/password"})
+            except (OSError, ValueError):
+                continue
+    # de-dupe (same app found twice) and check each one answers
+    uniq = {}
+    for f in found:
+        uniq.setdefault((f["kind"], f.get("url"), f.get("api_key") or f.get("token")), f)
+    found = list(uniq.values())
+    futs = [(f, POOL.submit(test_service, f["kind"], f)) for f in found]
+    for f, fut in futs:
+        try:
+            r = fut.result(timeout=20)
+        except Exception as e:
+            r = {"ok": False, "message": str(e)}
+        f["verified"], f["message"] = r["ok"], r["message"]
+    found.sort(key=lambda f: ("radarr sonarr seerr plex prowlarr nzbget qbittorrent".find(f["kind"]), f["name"]))
+    return {"mounted": True, "found": found}
+
+
+# -- connection tests for the setup page
+def test_service(kind, c):
+    url = (c.get("url") or "").rstrip("/")
+    try:
+        if kind in ("radarr", "sonarr", "prowlarr"):
+            ver = "v1" if kind == "prowlarr" else "v3"
+            r = requests.get(f"{url}/api/{ver}/system/status", headers={"X-Api-Key": c.get("api_key", "")}, timeout=8)
+            if r.status_code == 401:
+                return {"ok": False, "message": "Wrong API key"}
+            r.raise_for_status()
+            j = r.json()
+            return {"ok": True, "message": f"{j.get('appName') or kind.title()} {j.get('version', '')} ✓".strip()}
+        if kind == "seerr":
+            r = requests.get(f"{url}/api/v1/settings/main", headers={"X-Api-Key": c.get("api_key", "")}, timeout=8)
+            if r.status_code in (401, 403):
+                return {"ok": False, "message": "Wrong API key"}
+            r.raise_for_status()
+            st = requests.get(f"{url}/api/v1/status", timeout=8).json()
+            return {"ok": True, "message": f"Connected · version {st.get('version', '?')} ✓"}
+        if kind == "plex":
+            r = requests.get(f"{url}/library/sections", params={"X-Plex-Token": c.get("token", "")},
+                             headers={"Accept": "application/json"}, timeout=8)
+            if r.status_code == 401:
+                return {"ok": False, "message": "Wrong Plex token"}
+            r.raise_for_status()
+            n = len((r.json().get("MediaContainer") or {}).get("Directory") or [])
+            return {"ok": True, "message": f"Connected · {n} libraries ✓"}
+        if kind == "nzbget":
+            v = NzbGet(c).rpc("version")
+            return {"ok": True, "message": f"NZBGet {v} ✓"}
+        if kind == "qbittorrent":
+            v = QBittorrent(c).req("GET", "/app/version").text
+            return {"ok": True, "message": f"qBittorrent {v} ✓"}
+        if kind == "filestation":
+            fs = FileStation(c)
+            fs.login()
+            shares = fs.call("SYNO.FileStation.List", 2, "list_share").get("shares") or []
+            return {"ok": True, "message": f"Logged in · {len(shares)} shared folders ✓"}
+        if kind == "newznab":
+            r = requests.get(f"{url}{c.get('api_path', '/api')}", params={"t": "caps", "apikey": c.get("api_key", "")},
+                             timeout=10)
+            if r.status_code >= 400 or b"<error" in r.content[:300]:
+                return {"ok": False, "message": "The indexer rejected that key"}
+            return {"ok": True, "message": "Indexer answered ✓"}
+        if kind == "tmdb":
+            key = c.get("api_key", "")
+            hdr = {"Authorization": f"Bearer {key}"} if len(key) > 40 else {}
+            r = requests.get("https://api.themoviedb.org/3/configuration", headers=hdr,
+                             params={} if hdr else {"api_key": key}, timeout=8)
+            return {"ok": r.status_code < 400, "message": "TMDB key works ✓" if r.status_code < 400 else "TMDB rejected that key"}
+        return {"ok": False, "message": "Nothing to test"}
+    except ApiError as e:
+        return {"ok": False, "message": e.message}
+    except requests.exceptions.ConnectionError:
+        return {"ok": False, "message": "Couldn't reach it at that address"}
+    except requests.exceptions.Timeout:
+        return {"ok": False, "message": "It didn't answer in time"}
+    except Exception as e:
+        return {"ok": False, "message": f"{type(e).__name__}: {e}"[:200]}
+
+
 # ---------------------------------------------------------------- wiring
 
 def init():
@@ -3352,6 +3669,9 @@ def _cal_movies(ra, cal, queued, s0, s1, now):
 
 
 def load_config():
+    """The saved settings; an empty config (first run) until the setup page saves one."""
+    if not os.path.exists(CONFIG_PATH):
+        return {}
     with open(CONFIG_PATH, encoding="utf-8") as f:
         return json.load(f)
 
@@ -3374,17 +3694,22 @@ def warm_loop():
         time.sleep(240)
 
 
-PUBLIC = ("/", "/apk", "/Harbour.apk", "/HarbourV2.apk")
+PUBLIC = ("/", "/apk", "/Harbour.apk", "/HarbourV2.apk", "/HarbourV3.apk", "/v3", "/setup",
+          "/api/pair/start", "/api/pair/status", "/setup/api/login", "/favicon.ico")
 
 
 @app.before_request
 def check_token():
-    if request.path.lower() in [p.lower() for p in PUBLIC]:
+    path = request.path.lower()
+    if path in [p.lower() for p in PUBLIC]:
         return None
-    token = CFG.get("token") or ""
+    if path.startswith("/setup/"):
+        return None if setup_authed() else (jsonify(error="Log in to the setup page first"), 401)
+    if not CFG.get("token"):
+        return jsonify(error="The gateway isn't set up yet — open http://<your NAS>:8765/setup"), 503
     given = request.headers.get("X-Token") or request.args.get("t") or ""
-    if token and not hmac.compare_digest(token, given):
-        return jsonify(error="Wrong access token — check Harbour's settings"), 401
+    if not valid_token(given):
+        return jsonify(error="Wrong access token — pair this device again from Harbour's settings"), 401
     return None
 
 
@@ -3410,7 +3735,103 @@ def on_error(e):
 
 @app.get("/")
 def root():
-    return jsonify(name="Harbour gateway", version=VERSION, ok=True)
+    # Apps look for this answer when they search the network for a gateway.
+    if "text/html" in (request.headers.get("Accept") or "") and not request.args.get("json"):
+        return Response(status=302, headers={"Location": "/setup"})
+    return jsonify(name="Harbour gateway", app="harbour-gateway", version=VERSION, ok=True,
+                   setup=bool(CFG.get("token")))
+
+
+@app.get("/setup")
+def setup_page():
+    with open(SETUP_HTML_PATH, encoding="utf-8") as f:
+        html = f.read()
+    return Response(html, mimetype="text/html", headers={"Cache-Control": "no-store"})
+
+
+@app.post("/setup/api/login")
+def setup_login():
+    b = request.get_json(silent=True) or {}
+    if CFG.get("token") and not hmac.compare_digest(CFG["token"], str(b.get("pin", ""))):
+        time.sleep(1)
+        return jsonify(error="That's not the gateway PIN"), 401
+    resp = jsonify(ok=True)
+    resp.set_cookie("hb_setup", setup_cookie_value(), httponly=True, samesite="Strict", max_age=30 * 86400)
+    return resp
+
+
+@app.get("/setup/api/state")
+def setup_state():
+    cfg = json.loads(json.dumps(CFG))
+    devices = [{"index": i, "name": d.get("name"), "added": d.get("added")} for i, d in enumerate(cfg.pop("devices", []) or [])]
+    with _PAIR_LOCK:
+        pending = [{"id": p["id"], "code": p["code"], "name": p["name"], "ip": p["ip"]}
+                   for p in _PAIRS.values() if p["status"] == "pending" and time.time() - p["at"] < 600]
+    writable = os.access(os.path.dirname(CONFIG_PATH) or ".", os.W_OK) and \
+        (not os.path.exists(CONFIG_PATH) or os.access(CONFIG_PATH, os.W_OK))
+    return jsonify(config=cfg, devices=devices, pending=pending, version=VERSION, update=gateway_update(),
+                   writable=writable, stack=os.path.isdir(STACK_DIR), firstRun=not CFG.get("token"),
+                   host=request.host.split(":")[0])
+
+
+@app.post("/setup/api/save")
+def setup_save():
+    b = request.get_json(silent=True) or {}
+    new = b.get("config")
+    if not isinstance(new, dict):
+        raise ApiError("Nothing to save")
+    pin = str(new.get("token") or "").strip()
+    if len(pin) < 4:
+        raise ApiError("Choose a gateway PIN of at least 4 characters")
+    new["token"] = pin
+    new["devices"] = CFG.get("devices") or []
+    save_config(normalise_config(new))
+    resp = jsonify(ok=True, message="Saved — the gateway is using your new settings")
+    resp.set_cookie("hb_setup", setup_cookie_value(), httponly=True, samesite="Strict", max_age=30 * 86400)
+    return resp
+
+
+@app.post("/setup/api/test")
+def setup_test():
+    b = request.get_json(silent=True) or {}
+    return jsonify(test_service(b.get("kind"), b.get("conf") or {}))
+
+
+@app.get("/setup/api/detect")
+def setup_detect():
+    return jsonify(detect_apps(request.host.split(":")[0]))
+
+
+@app.post("/setup/api/pair")
+def setup_pair():
+    b = request.get_json(silent=True) or {}
+    return jsonify(pair_decide(b.get("id"), bool(b.get("approve"))))
+
+
+@app.post("/setup/api/device/remove")
+def setup_device_remove():
+    b = request.get_json(silent=True) or {}
+    new = json.loads(json.dumps(CFG))
+    devs = new.get("devices") or []
+    i = b.get("index")
+    if not isinstance(i, int) or not 0 <= i < len(devs):
+        raise ApiError("No such device")
+    devs.pop(i)
+    save_config(new)
+    return jsonify(ok=True)
+
+
+@app.post("/api/pair/start")
+def api_pair_start():
+    b = request.get_json(silent=True) or {}
+    if not CFG.get("token"):
+        raise ApiError("Finish setting up the gateway first: open http://<your NAS>:8765/setup", 503)
+    return jsonify(pair_start(b.get("name")))
+
+
+@app.get("/api/pair/status")
+def api_pair_status():
+    return jsonify(pair_status(request.args.get("id", "")))
 
 
 @app.get("/apk")
@@ -3448,6 +3869,7 @@ def config():
                    dashboard=HUB is not None,
                    trailers=trailers_available(),
                    indexers=bool(CFG.get("prowlarr") or CFG.get("newznab")),
+                   gatewayUpdate=gateway_update(),
                    repo=CFG.get("github_repo") or DEFAULT_REPO)
 
 
@@ -3509,6 +3931,25 @@ def apk_v2():
         return jsonify(error="No Harbour v2 build published yet"), 404
     r = requests.get(asset["browser_download_url"], stream=True, timeout=60)
     headers = {"Content-Disposition": 'attachment; filename="HarbourV2.apk"'}
+    if r.headers.get("Content-Length"):
+        headers["Content-Length"] = r.headers["Content-Length"]
+    return Response(stream_with_context(r.iter_content(64 * 1024)),
+                    mimetype="application/vnd.android.package-archive", headers=headers)
+
+
+@app.get("/HarbourV3.apk")
+@app.get("/harbourv3.apk")
+@app.get("/v3")
+def apk_v3():
+    """Newest Harbour V3 build (tags v3.*) — for Downloader on a TV: http://<nas>:8765/v3"""
+    repo = CFG.get("github_repo") or DEFAULT_REPO
+    rels = requests.get(f"https://api.github.com/repos/{repo}/releases", params={"per_page": 100}, timeout=20).json()
+    asset = next((a for r in rels if str(r.get("tag_name", "")).startswith("v3.")
+                  for a in r.get("assets") or [] if a.get("name", "").endswith(".apk")), None)
+    if not asset:
+        return jsonify(error="No Harbour V3 build published yet"), 404
+    r = requests.get(asset["browser_download_url"], stream=True, timeout=60)
+    headers = {"Content-Disposition": 'attachment; filename="HarbourV3.apk"'}
     if r.headers.get("Content-Length"):
         headers["Content-Length"] = r.headers["Content-Length"]
     return Response(stream_with_context(r.iter_content(64 * 1024)),
@@ -3769,10 +4210,9 @@ def downloads_action():
     return jsonify(c.act(b.get("id"), b.get("action")))
 
 
-if os.path.exists(CONFIG_PATH):
-    init()
-else:
-    log.warning("No config at %s — copy config.example.json there", CONFIG_PATH)
+init()
+if not CFG.get("token"):
+    log.warning("Not set up yet — open http://<your NAS>:8765/setup in a browser")
 
 if __name__ == "__main__":
     threading.Thread(target=warm_loop, daemon=True).start()

@@ -1068,3 +1068,112 @@ def test_indexer_search_and_grab(client, monkeypatch):
     assert "Prowlarr" in g["message"] and json.loads(responses.calls[-1].request.body) == {"guid": "g1", "indexerId": 4}
     assert client.post("/api/indexers/grab", headers=H, json={"id": "nope", "target": "qb|"}).status_code == 410
     assert client.post("/api/indexers/grab", headers=H, json={"id": nzb["id"], "target": "qb|"}).status_code == 400
+
+
+# ---------------------------------------------------------------- V3: setup page, pairing, auto-detect
+
+@pytest.fixture
+def fresh(tmp_path, monkeypatch):
+    """A gateway with no config yet (first run), saving into a temp folder."""
+    monkeypatch.setattr(gw, "CONFIG_PATH", str(tmp_path / "config.json"))
+    gw.init()
+    yield gw.app.test_client(), tmp_path
+    monkeypatch.undo()
+    gw.init()
+
+
+def test_first_run_setup_and_save(fresh):
+    c, tmp = fresh
+    assert c.get("/?json=1").get_json()["setup"] is False
+    assert c.get("/", headers={"Accept": "text/html"}).status_code == 302
+    assert c.get("/api/config").status_code == 503
+    page = c.get("/setup")
+    assert page.status_code == 200 and b"Harbour setup" in page.data
+    st = c.get("/setup/api/state").get_json()
+    assert st["firstRun"] is True and st["writable"] is True
+    assert c.post("/setup/api/save", json={"config": {"token": "12"}}).status_code == 400
+    r = c.post("/setup/api/save", json={"config": {
+        "token": "4321",
+        "radarr": [{"name": "Radarr", "url": "http://nas:7878/", "api_key": "a"},
+                   {"name": "Radarr 4K", "url": "http://nas:7879", "api_key": "b", "icon": "4k"},
+                   {"name": "", "url": ""}],
+        "sonarr": [], "plex": {"url": ""}, "qbittorrent": {"url": "http://nas:8080", "api_key": "q"},
+        "filestation": {"url": "http://nas:5000", "username": "u", "password": "p", "allowed_shares": "/data, /video"}}})
+    assert r.status_code == 200, r.data
+    saved = json.load(open(tmp / "config.json"))
+    assert [x["id"] for x in saved["radarr"]] == ["radarr", "radarr-4k"] and saved["radarr"][0]["url"] == "http://nas:7878"
+    assert "sonarr" not in saved and "plex" not in saved and saved["filestation"]["allowed_shares"] == ["/data", "/video"]
+    # now it's protected: a new browser must log in, the cookie from saving works
+    assert c.get("/setup/api/state").status_code == 200
+    other = gw.app.test_client()
+    assert other.get("/setup/api/state").status_code == 401
+    assert other.post("/setup/api/login", json={"pin": "nope"}).status_code == 401
+    assert other.post("/setup/api/login", json={"pin": "4321"}).status_code == 200
+    assert other.get("/setup/api/state").get_json()["config"]["radarr"][1]["name"] == "Radarr 4K"
+    assert other.get("/api/config", headers={"X-Token": "4321"}).status_code == 200
+    assert {s["inst"] for s in other.get("/api/config", headers={"X-Token": "4321"}).get_json()["services"]} \
+        == {"radarr", "radarr-4k"}
+
+
+def test_pairing(fresh):
+    c, tmp = fresh
+    c.post("/setup/api/save", json={"config": {"token": "4321"}})
+    tv = gw.app.test_client()
+    p = tv.post("/api/pair/start", json={"name": "Lounge Fire TV"}).get_json()
+    assert len(p["code"]) == 4
+    assert tv.get(f"/api/pair/status?id={p['id']}").get_json() == {"status": "pending"}
+    st = c.get("/setup/api/state").get_json()
+    assert st["pending"][0]["code"] == p["code"] and st["pending"][0]["name"] == "Lounge Fire TV"
+    assert tv.post("/setup/api/pair", json={"id": p["id"], "approve": True}).status_code == 401  # TV can't approve itself
+    assert c.post("/setup/api/pair", json={"id": p["id"], "approve": True}).status_code == 200
+    got = tv.get(f"/api/pair/status?id={p['id']}").get_json()
+    assert got["status"] == "approved" and len(got["token"]) > 20
+    assert tv.get(f"/api/pair/status?id={p['id']}").get_json()["status"] == "expired"  # handed over once
+    assert tv.get("/api/config", headers={"X-Token": got["token"]}).status_code == 200
+    devs = c.get("/setup/api/state").get_json()["devices"]
+    assert devs[0]["name"] == "Lounge Fire TV" and "token" not in devs[0]
+    assert "devices" not in c.get("/setup/api/state").get_json()["config"]
+    # saving the page keeps paired devices; removing one revokes it
+    c.post("/setup/api/save", json={"config": {"token": "4321"}})
+    assert tv.get("/api/config", headers={"X-Token": got["token"]}).status_code == 200
+    c.post("/setup/api/device/remove", json={"index": 0})
+    assert tv.get("/api/config", headers={"X-Token": got["token"]}).status_code == 401
+
+
+@responses.activate
+def test_detect_apps(tmp_path, monkeypatch):
+    stack = tmp_path / "docker"
+    (stack / "radarr").mkdir(parents=True)
+    (stack / "radarr" / "config.xml").write_text("<Config><Port>7878</Port><ApiKey>RK</ApiKey><InstanceName>Radarr</InstanceName></Config>")
+    (stack / "radarr-truehd").mkdir()
+    (stack / "radarr-truehd" / "config.xml").write_text("<Config><Port>7879</Port><ApiKey>RK4</ApiKey><UrlBase>r4k</UrlBase></Config>")
+    (stack / "sonarr" / "MediaCover").mkdir(parents=True)
+    (stack / "sonarr" / "MediaCover" / "config.xml").write_text("<Config><Port>1</Port><ApiKey>NO</ApiKey></Config>")
+    (stack / "sonarr" / "config.xml").write_text("<Config><Port>8989</Port><ApiKey>SK</ApiKey></Config>")
+    (stack / "jellyseerr" / "config").mkdir(parents=True)
+    (stack / "jellyseerr" / "config" / "settings.json").write_text(json.dumps({"main": {"apiKey": "JK"}}))
+    plex = stack / "plex" / "Library" / "Application Support" / "Plex Media Server"
+    plex.mkdir(parents=True)
+    (plex / "Preferences.xml").write_text('<Preferences PlexOnlineToken="PT" />')
+    (stack / "nzbget").mkdir()
+    (stack / "nzbget" / "nzbget.conf").write_text("ControlPort=6789\nControlUsername=nzb\nControlPassword=pw\n")
+    monkeypatch.setattr(gw, "STACK_DIR", str(stack))
+    responses.get("http://192.168.4.68:7878/api/v3/system/status", json={"appName": "Radarr", "version": "5"})
+    responses.get("http://192.168.4.68:7879/r4k/api/v3/system/status", status=401)
+    responses.get("http://192.168.4.68:8989/api/v3/system/status", json={"appName": "Sonarr", "version": "4"})
+    responses.get("http://192.168.4.68:5055/api/v1/settings/main", json={})
+    responses.get("http://192.168.4.68:5055/api/v1/status", json={"version": "2.7"})
+    responses.get("http://192.168.4.68:32400/library/sections", json={"MediaContainer": {"Directory": [{}, {}]}})
+    responses.post("http://192.168.4.68:6789/jsonrpc", json={"result": "25.0"})
+    got = gw.detect_apps("192.168.4.68")
+    assert got["mounted"] is True
+    by = {(f["kind"], f["id"]): f for f in got["found"]}
+    assert by[("radarr", "radarr")]["api_key"] == "RK" and by[("radarr", "radarr")]["verified"] is True
+    r4 = by[("radarr", "radarr-truehd")]
+    assert r4["url"] == "http://192.168.4.68:7879/r4k" and r4["verified"] is False and "key" in r4["message"]
+    assert by[("sonarr", "sonarr")]["api_key"] == "SK"  # the one under MediaCover was skipped
+    assert by[("seerr", "seerr")]["name"] == "Jellyseerr" and by[("seerr", "seerr")]["verified"]
+    assert by[("plex", "plex")]["token"] == "PT" and "2 libraries" in by[("plex", "plex")]["message"]
+    assert by[("nzbget", "nzbget")]["username"] == "nzb" and by[("nzbget", "nzbget")]["verified"]
+    monkeypatch.setattr(gw, "STACK_DIR", str(tmp_path / "missing"))
+    assert gw.detect_apps("x") == {"mounted": False, "found": []}
