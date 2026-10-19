@@ -1899,7 +1899,19 @@ async function start() {
 }
 document.addEventListener("visibilitychange", () => {
   if (!document.hidden && S.tabs[S.tab]) topOf(S.tabs[S.tab])?.show?.();
+  if (!document.hidden) checkForNewVersion();
 });
+// A Home Screen app can stay open for days. When the gateway has been updated, load the new app.
+let lastVersionCheck = 0;
+async function checkForNewVersion() {
+  if (Date.now() - lastVersionCheck < 60000 || !S.config?.version) return;
+  lastVersionCheck = Date.now();
+  try {
+    const c = await get("/api/config");
+    if (c.version && c.version !== S.config.version) location.reload();
+  } catch { /* offline or signed out — try again later */ }
+}
+setInterval(() => { if (!document.hidden) checkForNewVersion(); }, 5 * 60000);
 start();
 </script>
 </body>
