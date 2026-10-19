@@ -1427,7 +1427,7 @@ function XScreen() {
       h("div", { class: "section" }, h("div", { class: "group" }, v.options.map(o =>
         h("button", { class: "cell", onclick: () => start(v, o) },
           h("div", { class: "main" }, h("div", { class: "t" }, o.label),
-            h("div", { class: "s" }, [o.quality, o.size ? "about " + fmtBytes(o.size) : ""].filter(Boolean).join(" · ") || "MP4")),
+            h("div", { class: "s" }, [o.quality, o.size ? (o.exact ? "" : "about ") + fmtBytes(o.size) : ""].filter(Boolean).join(" · ") || "MP4")),
           h("span", { class: "mini", style: "color:var(--tint);display:grid" }, svg("down"))))),
         h("div", { class: "section-foot" }, folderFoot()))));
     out.replaceChildren(head, ...vids);

@@ -2984,6 +2984,7 @@ X_POOL = ThreadPoolExecutor(max_workers=2)
 _X_JOBS = {}            # job id -> dict (newest last)
 _X_LOOKUPS = {}         # tweet id -> (time, yt-dlp info)
 _X_LOCK = threading.Lock()
+_X_SIZES = {}           # direct mp4 url -> real byte size (X's bitrates overstate it)
 _X_SRC = {}             # job id -> (direct mp4 url, headers) — kept on the gateway
 
 
@@ -3064,6 +3065,29 @@ def _x_options(entry):
     return out
 
 
+def _x_real_sizes(videos):
+    """Ask X for each file's real size. The bitrate X advertises is a ceiling, so estimates from it
+    can be 5x too big; a HEAD request per size gives the true number."""
+    def head(u, hdr):
+        if u in _X_SIZES:
+            return _X_SIZES[u]
+        r = requests.head(u, headers={k: v for k, v in hdr.items() if k.lower() == "user-agent"},
+                          timeout=8, allow_redirects=True)
+        n = int(r.headers.get("Content-Length") or 0) if r.ok else 0
+        if n:
+            _X_SIZES[u] = n
+            if len(_X_SIZES) > 500:
+                _X_SIZES.clear()
+        return n
+    opts = [o for v in videos for o in v["options"] if o.get("_url")]
+    got = par(**{str(i): (lambda o=o: safe(lambda: head(o["_url"], o.get("_headers") or {}), "X size", 0))
+                 for i, o in enumerate(opts)})
+    for i, o in enumerate(opts):
+        n = got[str(i)]
+        if n:
+            o["size"], o["exact"] = n, True
+
+
 def x_lookup(url, public=True):
     tid, url = x_parse(url)
     hit = _X_LOOKUPS.get(tid)
@@ -3088,6 +3112,7 @@ def x_lookup(url, public=True):
     first = entries[0] if entries else info
     videos = [{"index": i + 1, "duration": e.get("duration"), "thumbnail": e.get("thumbnail"),
                "options": _x_options(e)} for i, e in enumerate(entries)]
+    _x_real_sizes(videos)
     if public:
         for v in videos:
             v["options"] = [{k: val for k, val in o.items() if not k.startswith("_")} for o in v["options"]]

@@ -1362,6 +1362,7 @@ def test_x_download(client, monkeypatch, tmp_path):
     # The chosen size is fetched directly; the first time X refuses, so yt-dlp is the fallback.
     responses.get("https://video.twimg.com/ext_tw_video/1/pu/vid/1280x720/b.mp4", status=403)
     responses.get("https://video.twimg.com/ext_tw_video/1/pu/vid/1280x720/b.mp4", body=b"\1" * 5000)
+    responses.head("https://video.twimg.com/ext_tw_video/1/pu/vid/1280x720/b.mp4", headers={"Content-Length": "5000"})
     (tmp_path / "yt_dlp").mkdir()
     (tmp_path / "yt_dlp" / "__init__.py").write_text("")
     (tmp_path / "yt_dlp" / "__main__.py").write_text(FAKE_YTDLP)
@@ -1386,7 +1387,8 @@ def test_x_download(client, monkeypatch, tmp_path):
     assert r["handle"] == "liam_out_loud" and r["text"] == "Look at this"
     opts = r["videos"][0]["options"]
     assert [o["label"] for o in opts] == ["1280×720", "640×360", "480×270"]      # HLS left out, biggest first
-    assert opts[0]["quality"] == "HD" and opts[0]["size"] == 2176 * 1000 // 8 * 20
+    assert opts[0]["quality"] == "HD" and opts[0]["size"] == 5000 and opts[0]["exact"]   # real size from X
+    assert opts[1]["size"] == 832 * 1000 // 8 * 20 and not opts[1].get("exact")           # no answer: estimate
 
     j = client.post("/api/x/download", headers=H, json={"url": r["url"], "index": 1, "format": "http-2176"}).get_json()["job"]
     for _ in range(100):
