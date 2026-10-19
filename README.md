@@ -53,7 +53,7 @@ Make sure your Docker user has **Read/Write** on that folder (File Station → f
 | Menu | What you get |
 |---|---|
 | **Home** | Today's and this week's episodes and movies, library stats, Ready to watch, Coming up, New movies, Trending. |
-| **Search** | One search box, two answers: **Movies & TV** (TMDB via Jellyseerr) or **Indexers** (Prowlarr and your Newznab indexers directly; send a release to NZBGet or qBittorrent). |
+| **Search** | Pick **Movies**, **TV** (TMDB via Jellyseerr) or **Indexers** first, then type. Indexers searches (Prowlarr and your Newznab indexers directly; send a release to NZBGet or qBittorrent). |
 | **Discover** | Trending, popular, upcoming. |
 | **Movies / TV** | Your Radarr and Sonarr libraries merged. One page per title: ratings, trailers (played in Harbour), cast, where it streams, what you own in HD/4K, play in Plex, auto/manual search, monitor, delete, request. Seasons → episodes with per-episode actions. |
 | **Calendar** | Month view of releases; click an episode to manage it. |
