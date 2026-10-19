@@ -3023,8 +3023,12 @@ def _x_err(stderr):
     msg = re.sub(r"^ERROR:\s*(\[\w+\]\s*\d*:?\s*)?", "", msg)
     if re.search(r"No video could be found", msg, re.I):
         return "That post doesn't have a video"
-    if re.search(r"login|authenticat|NSFW|age.restrict|protected", msg, re.I):
-        return "X needs a signed-in account for this post (add a cookies file in the gateway config)"
+    if re.search(r"login|authenticat|NSFW|age.restrict|protected|sensitive", msg, re.I):
+        c = x_conf().get("cookies")
+        if c and os.path.isfile(c):
+            return ("X refused this post even with your sign-in. The sign-in may have expired (paste fresh values in "
+                    "Settings → X sign-in), or your X account needs 'Display media that may contain sensitive content' on")
+        return "X needs a signed-in account for this post — add one in Settings → X sign-in"
     return f"X: {msg[:200]}"
 
 
@@ -4490,6 +4494,83 @@ def x_lookup_route():
     if not x_available():
         raise ApiError("X downloads need File Station set up on the gateway", 404)
     return jsonify(x_lookup((request.get_json(silent=True) or {}).get("url")))
+
+
+def x_cookie_file():
+    return os.path.join(os.path.dirname(CONFIG_PATH) or ".", "x-cookies.txt")
+
+
+def _raw_config():
+    try:
+        with open(CONFIG_PATH, encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return json.loads(json.dumps(CFG))
+
+
+def _cookie_value(v, name):
+    """Accept the bare value, 'name=value', or a whole pasted Cookie header."""
+    v = (v or "").strip().strip('"').strip("'")
+    m = re.search(rf"(?:^|[;\s]){name}=([^;\s]+)", v)
+    if m:
+        v = m.group(1)
+    if not re.fullmatch(r"[A-Za-z0-9%_.-]{16,400}", v):
+        raise ApiError(f"That doesn't look like an X {name} value — copy just the Value column")
+    return v
+
+
+@app.get("/api/x/cookies")
+def x_cookies_status():
+    path = x_conf().get("cookies") or ""
+    ok = bool(path) and os.path.isfile(path)
+    return jsonify(set=ok, updated=int(os.path.getmtime(path)) if ok else None)
+
+
+@app.post("/api/x/cookies")
+def x_cookies_save():
+    b = request.get_json(silent=True) or {}
+    auth = _cookie_value(b.get("auth_token"), "auth_token")
+    ct0 = _cookie_value(b.get("ct0"), "ct0")
+    expires = int(time.time()) + 5 * 365 * 86400
+    lines = ["# Netscape HTTP Cookie File", "# Written by Harbour from Settings → X sign-in"]
+    for dom in (".x.com", ".twitter.com"):
+        for k, v in (("auth_token", auth), ("ct0", ct0)):
+            lines.append("\t".join([dom, "TRUE", "/", "TRUE", str(expires), k, v]))
+    path = x_cookie_file()
+    try:
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines) + "\n")
+        try:
+            os.chmod(tmp, 0o600)
+        except OSError:
+            pass
+        os.replace(tmp, path)
+    except OSError as e:
+        raise ApiError(f"Couldn't save the X sign-in ({e.strerror}). The gateway's config folder must be writable.", 500)
+    c = _raw_config()
+    tw = c.get("twitter") if isinstance(c.get("twitter"), dict) else {}
+    if tw.get("cookies") != path:
+        tw["cookies"] = path
+        c["twitter"] = tw
+        save_config(c)
+    _X_LOOKUPS.clear()
+    return jsonify(ok=True, message="X sign-in saved")
+
+
+@app.delete("/api/x/cookies")
+def x_cookies_clear():
+    path = x_conf().get("cookies") or x_cookie_file()
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+    c = _raw_config()
+    if isinstance(c.get("twitter"), dict) and "cookies" in c["twitter"]:
+        c["twitter"].pop("cookies")
+        save_config(c)
+    _X_LOOKUPS.clear()
+    return jsonify(ok=True, message="X sign-in removed")
 
 
 @app.post("/api/x/download")

@@ -1620,7 +1620,11 @@ function SettingsScreen() {
     kids.push(h("div", { class: "section-head" }, "NAS & extras"), h("div", { class: "section" }, h("div", { class: "group" },
       singles.map(sec => h("button", { class: "cell", style: "--inset:57px", onclick: () => push(EditScreen(sec, 0)) },
         sectionIcon(sec), h("div", { class: "main nowrap" }, h("div", { class: "t" }, schema[sec].title),
-          h("div", { class: "s" }, values[sec] ? (values[sec].url || (values[sec]._set?.length ? "Set" : "")) || "Set" : "Not set up")), svg("chev"))))));
+          h("div", { class: "s" }, values[sec] ? (values[sec].url || (values[sec]._set?.length ? "Set" : "")) || "Set" : "Not set up")), svg("chev"))),
+      S.config?.xdl && h("button", { class: "cell", style: "--inset:57px", onclick: () => push(XSignInScreen()) },
+        h("span", { class: "icon", style: "background:#000" }, svg("key")),
+        h("div", { class: "main nowrap" }, h("div", { class: "t" }, "X sign-in"),
+          h("div", { class: "s" }, "For adult or sign-in-only videos")), svg("chev")))));
     kids.push(h("div", { class: "section" }, h("div", { class: "group" },
       h("button", { class: "cell center danger", onclick: signOut }, "Sign out"))));
     box.replaceChildren(...kids);
@@ -1743,6 +1747,59 @@ function PasswordScreen() {
     finally { btn.disabled = false; }
   }
   return { el: p.el, title: "Change password" };
+}
+
+/** Paste two cookies from a signed-in x.com so the downloader can fetch sensitive / sign-in-only posts. */
+function XSignInScreen() {
+  const btn = h("button", { class: "navbtn bold", onclick: () => save() }, "Save");
+  const p = page({ title: "X sign-in", back: "Settings", right: [btn] });
+  const status = h("div", { class: "section-foot" }, "Checking…");
+  const field = (label, ph) => {
+    const inp = h("input", { type: "password", placeholder: ph, autocapitalize: "off", autocorrect: "off", spellcheck: "false", autocomplete: "off" });
+    const eye = h("button", { class: "navbtn", style: "height:24px;padding:0 0 0 8px;font-size:15px;flex:none;max-width:none",
+      onclick: e => { e.preventDefault(); inp.type = inp.type === "password" ? "text" : "password"; eye.textContent = inp.type === "password" ? "Show" : "Hide"; } }, "Show");
+    return [inp, h("label", { class: "field" }, h("div", { class: "lbl" }, label), h("div", { style: "display:flex;align-items:center" }, inp, eye))];
+  };
+  const [auth, authRow] = field("auth_token", "Paste the value");
+  const [ct0, ct0Row] = field("ct0", "Paste the value");
+  const removeGroup = h("div", { class: "section", style: "display:none" }, h("div", { class: "group" },
+    h("button", { class: "cell center danger", onclick: () => remove() }, "Remove X sign-in")));
+  const steps = [
+    "On your Mac, sign in at x.com in Safari. In X: Settings → Privacy and safety → Content you see → turn on “Display media that may contain sensitive content”.",
+    "Safari → Settings → Advanced → tick “Show features for web developers”.",
+    "On the x.com tab: Develop → Show Web Inspector → Storage → Cookies → x.com.",
+    "Find auth_token and ct0. Double-click each Value, copy it, and paste it here (AirDrop or Universal Clipboard gets it to your phone).",
+  ];
+  p.body.append(
+    h("div", { class: "section", style: "margin-top:12px" }, h("div", { class: "group" }, authRow, ct0Row), status),
+    removeGroup,
+    h("div", { class: "section-head" }, "Where to find them"),
+    h("div", { class: "section" }, h("div", { class: "group", style: "padding:6px 16px 10px" },
+      ...steps.map((t, i) => h("div", { style: "display:flex;gap:10px;padding:8px 0;font-size:15px;line-height:1.35" },
+        h("b", { style: "color:var(--tint);flex:none" }, `${i + 1}.`), h("span", {}, t)))),
+      h("div", { class: "section-foot" }, "Chrome or Firefox work too: Developer tools → Application/Storage → Cookies. "
+        + "These two values are a key to your X account — they stay on the gateway and are never sent back to the phone. "
+        + "They last until you log out of X in that browser; if adult videos stop working, paste fresh ones.")));
+  async function refresh() {
+    try {
+      const r = await get("/api/x/cookies");
+      status.textContent = r.set ? `Signed in · saved ${new Date(r.updated * 1000).toLocaleDateString()}. Paste new values to replace it.` : "Not signed in. Sign-in-only and adult posts won't download.";
+      removeGroup.style.display = r.set ? "" : "none";
+    } catch (e) { status.textContent = e.message; }
+  }
+  async function save() {
+    if (!auth.value.trim() || !ct0.value.trim()) return toast("Paste both values", true);
+    btn.disabled = true;
+    try { const r = await post("/api/x/cookies", { auth_token: auth.value, ct0: ct0.value }); toast(r.message || "Saved"); auth.value = ct0.value = ""; refresh(); }
+    catch (e) { errToast(e); }
+    finally { btn.disabled = false; }
+  }
+  async function remove() {
+    try { const r = await api("DELETE", "/api/x/cookies"); toast(r.message || "Removed"); refresh(); }
+    catch (e) { errToast(e); }
+  }
+  refresh();
+  return { el: p.el, title: "X sign-in" };
 }
 
 async function afterSettingsChange() {

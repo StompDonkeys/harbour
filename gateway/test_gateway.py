@@ -1416,3 +1416,22 @@ def test_file_play_and_stream(client):
     assert "SYNO.FileStation.Download" in got["url"] and got["range"] == "bytes=0-3"
     # Outside the allowed shares is refused.
     assert client.get("/api/play?ref=" + quote("file:/homes/x.mkv"), headers=H).status_code == 403
+
+
+def test_x_cookies(client, tmp_path, monkeypatch):
+    cfg_path = tmp_path / "config.json"
+    cfg_path.write_text(json.dumps(CFG))
+    monkeypatch.setattr(gw, "CONFIG_PATH", str(cfg_path))
+    gw.init()
+    assert client.get("/api/x/cookies", headers=H).get_json()["set"] is False
+    bad = client.post("/api/x/cookies", headers=H, json={"auth_token": "nope", "ct0": "x"})
+    assert bad.status_code == 400
+    r = client.post("/api/x/cookies", headers=H, json={"auth_token": " \"" + "a1" * 20 + "\" ",
+                                                       "ct0": "ct0=" + "b2" * 40 + "; foo=bar"})
+    assert r.status_code == 200
+    text = (tmp_path / "x-cookies.txt").read_text()
+    assert "\tauth_token\t" + "a1" * 20 in text and "\tct0\t" + "b2" * 40 in text and ".twitter.com" in text
+    assert json.loads(cfg_path.read_text())["twitter"]["cookies"] == str(tmp_path / "x-cookies.txt")
+    assert client.get("/api/x/cookies", headers=H).get_json()["set"] is True
+    assert client.delete("/api/x/cookies", headers=H).status_code == 200
+    assert not (tmp_path / "x-cookies.txt").exists() and "cookies" not in json.loads(cfg_path.read_text())["twitter"]
