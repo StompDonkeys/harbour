@@ -147,6 +147,17 @@ fun HarbourApp(prefs: Prefs) {
         }
     }
 
+    // Pick up changes made on the setup page or the phone (new services, indexers…) without a restart.
+    LaunchedEffect(gateway) {
+        val g = gateway ?: return@LaunchedEffect
+        while (true) {
+            kotlinx.coroutines.delay(60_000)
+            val fresh = runCatching { g.config() }.getOrNull() ?: continue
+            val cur = loadedConfig ?: continue
+            if (fresh.copy(gatewayUpdate = cur.gatewayUpdate) != cur) loadedConfig = fresh
+        }
+    }
+
     val onSaved: (String, String) -> Unit = { u, t ->
         prefs.url = u
         prefs.token = t

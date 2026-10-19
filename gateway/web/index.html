@@ -94,6 +94,9 @@ html.wide .modal.trailer .mbody > div:first-child { max-width: 1100px; margin: 0
 .navbtn:disabled { opacity: .35; }
 .navbar.over-hero:not(.solid) .navbtn { color: #fff; filter: drop-shadow(0 1px 3px rgba(0,0,0,.6)); }
 .navbar.over-hero { margin-bottom: calc(-44px - var(--top)); }
+.brand { display: flex; align-items: center; gap: 10px; padding: 6px 16px 2px; font-size: 20px; font-weight: 700; letter-spacing: -.2px; }
+.brand img { width: 34px; height: 34px; border-radius: 9px; box-shadow: 0 2px 8px rgba(0,0,0,.18); }
+html.wide .tab:not(.split) .brand { max-width: 760px; margin-left: auto; margin-right: auto; }
 .large-title { font-size: 34px; font-weight: 700; letter-spacing: .37px; padding: 0 16px 8px; margin: 2px 0 0; }
 
 /* tab bar */
@@ -254,6 +257,7 @@ button.cell:active, .cell.tap:active { background: var(--cell-2); }
 .wk-day .dots i { width: 5px; height: 5px; border-radius: 50%; background: var(--label-3); }
 .cal-day.today { color: var(--red); }
 .chip.purple { color: #af52de; }
+.meta .chip { font-size: 11px; font-weight: 700; padding: 1px 6px; border-radius: 5px; background: var(--fill); text-transform: uppercase; letter-spacing: .3px; }
 .modal.trailer { background: #000; }
 .modal.trailer .navbar { background: rgba(28,28,30,.9); color: #fff; box-shadow: none; }
 .modal.trailer .section-foot { color: rgba(235,235,245,.6); }
@@ -385,6 +389,7 @@ const ICON = {
   folderPlus: '<svg viewBox="0 0 24 24"><path d="M3 7.5A1.5 1.5 0 0 1 4.5 6h4.6l2 2h8.4A1.5 1.5 0 0 1 21 9.5v8A1.5 1.5 0 0 1 19.5 19h-15A1.5 1.5 0 0 1 3 17.5z" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M12 11v5M9.5 13.5h5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>',
   play: '<svg viewBox="0 0 24 24"><path d="M8 5.5v13l10.5-6.5z" fill="currentColor"/></svg>',
   pause: '<svg viewBox="0 0 24 24"><rect x="6.5" y="5" width="3.6" height="14" rx="1" fill="currentColor"/><rect x="13.9" y="5" width="3.6" height="14" rx="1" fill="currentColor"/></svg>',
+  tabHome: '<svg viewBox="0 0 28 28"><path d="M4.5 13 14 4.5 23.5 13M7.5 10.5V23h5v-6h3v6h5V10.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>',
   tabLibrary: '<svg viewBox="0 0 28 28"><rect x="3.5" y="5.5" width="21" height="17" rx="3" fill="none" stroke="currentColor" stroke-width="2"/><path d="M3.5 10h21M3.5 18h21M8.5 5.5v4.5M8.5 18v4.5M14 5.5v4.5M14 18v4.5M19.5 5.5v4.5M19.5 18v4.5" stroke="currentColor" stroke-width="2"/></svg>',
   tabDiscover: '<svg viewBox="0 0 28 28"><circle cx="14" cy="14" r="10.5" fill="none" stroke="currentColor" stroke-width="2"/><path d="m18.5 9.5-2.6 6.4-6.4 2.6 2.6-6.4z" fill="currentColor"/></svg>',
   tabDownloads: '<svg viewBox="0 0 28 28"><circle cx="14" cy="14" r="10.5" fill="none" stroke="currentColor" stroke-width="2"/><path d="M14 8.5v10M9.8 14.5l4.2 4.2 4.2-4.2" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"/></svg>',
@@ -510,10 +515,10 @@ async function promptBox(title, message, value, okLabel = "OK") {
 
 // ------------------------------------------------------------------ navigation
 const TABS = [
-  { id: "library", split: true, label: "Library", icon: "tabLibrary", root: () => LibraryScreen(), show: () => arrServices().length > 0 },
+  { id: "library", split: true, label: "Home", icon: "tabHome", root: () => LibraryScreen(), show: () => arrServices().length > 0 },
   { id: "discover", split: true, label: "Discover", icon: "tabDiscover", root: () => DiscoverScreen(), show: () => !!seerrService() },
   { id: "calendar", split: true, label: "Calendar", icon: "tabCalendar", root: () => CalendarScreen(), show: () => !!S.config?.calendar },
-  { id: "downloads", label: "Downloads", icon: "tabDownloads", root: () => DownloadsScreen(), show: () => !!S.config?.downloads },
+  { id: "downloads", label: "Downloads", icon: "tabDownloads", root: () => DownloadsScreen(), show: () => !!(S.config?.downloads || S.config?.indexers) },
   { id: "files", split: true, label: "Files", icon: "tabFiles", root: () => FilesScreen(""), show: () => !!S.config?.files },
   { id: "settings", split: true, label: "Settings", icon: "tabSettings", root: () => SettingsScreen(), show: () => true },
 ];
@@ -768,7 +773,10 @@ function searchField(placeholder, run, clear) {
 
 // ------------------------------------------------------------------ Library (Radarr / Sonarr)
 function LibraryScreen() {
-  const p = page({ title: "Library", large: true, plain: true, right: [h("button", { class: "navbtn", onclick: () => load(true) }, svg("refresh"))] });
+  const p = page({ title: "Home", large: true, plain: true, right: [h("button", { class: "navbtn", onclick: () => load(true) }, svg("refresh"))] });
+  // Harbour branding above the large title
+  p.el.querySelector(".large-title")?.before(h("div", { class: "brand" },
+    h("img", { src: "/m/apple-touch-icon.png", alt: "" }), h("span", {}, S.config?.name || "Harbour")));
   const services = arrServices();
   let cur = services.find(s => `${s.kind}/${s.inst}` === lsGet("libSvc")) || services[0];
   const pills = h("div", { class: "pills" });
@@ -805,7 +813,7 @@ function LibraryScreen() {
   if (services.length > 1) drawPills();
   p.body.append(search.el, services.length > 1 ? pills : "", content);
   load();
-  return { el: p.el, title: "Library", refreshIfStale() { if (Date.now() - loadedAt > 60000 && !search.input.value) load(); } };
+  return { el: p.el, title: "Home", refreshIfStale() { if (Date.now() - loadedAt > 60000 && !search.input.value) load(); } };
 }
 
 /** Every title in a Radarr/Sonarr instance, A–Z, with a filter field. */
@@ -891,7 +899,7 @@ function DetailScreen(svc, id, preview) {
   let data = null, stale = false;
   const holder = h("div", {});
   p.body.append(holder);
-  if (preview) holder.append(header(preview), spinner()); else holder.append(spinner());
+  if (preview) holder.append(...header(preview), spinner()); else holder.append(spinner());
 
   function header(item) {
     const bd = h("div", { class: "backdrop" });
@@ -1239,11 +1247,19 @@ function CalendarScreen() {
 
 // ------------------------------------------------------------------ Downloads
 function DownloadsScreen() {
-  const p = page({ title: "Downloads", large: true });
+  const idx = !!S.config?.indexers;
+  const p = page({ title: "Downloads", large: true,
+    right: idx ? [h("button", { class: "navbtn", "aria-label": "Search indexers", onclick: () => push(IndexerScreen()) }, svg("search"))] : [] });
   const clientsBox = h("div", { class: "section" }), itemsBox = h("div", {});
   let timer = null, visible = false, busy = false, last = null;
+  if (idx) p.body.append(h("div", { class: "section" }, h("div", { class: "group" },
+    h("button", { class: "cell", style: "--inset:57px", onclick: () => push(IndexerScreen()) },
+      h("span", { class: "icon", style: "background:#5e5ce6" }, svg("search")),
+      h("div", { class: "main" }, h("div", { class: "t" }, "Search indexers"), h("div", { class: "s" }, "Usenet and torrents, straight to your download client")),
+      svg("chev")))));
   p.body.append(clientsBox, itemsBox, spinner());
   async function load() {
+    if (!S.config?.downloads) { p.body.querySelector(":scope > .spin")?.remove(); return; }
     if (busy) return; busy = true;
     try {
       const d = await get("/api/downloads");
@@ -1296,6 +1312,71 @@ function DownloadsScreen() {
     show() { visible = true; load(); clearInterval(timer); timer = setInterval(tick, 3000); },
     hide() { visible = false; clearInterval(timer); },
   };
+}
+
+// ------------------------------------------------------------------ Indexer search (Prowlarr / Newznab)
+function IndexerScreen() {
+  const p = page({ title: "Search indexers", back: "Downloads" });
+  let kind = "all", proto = "all", sort = "best", results = null, errors = [], targets = null, seq = 0;
+  const input = h("input", { type: "search", placeholder: "Movie, show or release name", autocapitalize: "off", autocorrect: "off", enterkeyhint: "search" });
+  const form = h("form", { class: "search", onsubmit: e => { e.preventDefault(); input.blur(); run(); } }, svg("search"), input);
+  const segKind = h("div", { class: "seg", style: "margin:0 16px 8px" });
+  const segProto = h("div", { class: "seg", style: "margin:0 16px 8px" });
+  const segSort = h("div", { class: "seg", style: "margin:0 16px 14px" });
+  const out = h("div", {}, emptyState("Search your indexers", "Type a name and press Search. Results come from Prowlarr and your Newznab indexers."));
+  const seg = (box, opts, cur, set) => box.replaceChildren(...opts.map(([k, l]) => h("button", { class: k === cur ? "on" : "", type: "button", onclick: () => set(k) }, l)));
+  function drawSegs() {
+    seg(segKind, [["all", "All"], ["movies", "Movies"], ["tv", "TV"]], kind, k => { kind = k; drawSegs(); if (input.value.trim()) run(); });
+    seg(segProto, [["all", "Usenet + torrents"], ["usenet", "Usenet"], ["torrent", "Torrents"]], proto, k => { proto = k; drawSegs(); if (input.value.trim()) run(); });
+    seg(segSort, [["best", "Best"], ["size", "Biggest"], ["newest", "Newest"]], sort, k => { sort = k; drawSegs(); draw(); });
+  }
+  const ageDays = a => { const n = parseFloat(a); if (!a || isNaN(n)) return 1e9; return /mo$/.test(a) ? n * 30 : /h$/.test(a) ? n / 24 : /y$/.test(a) ? n * 365 : n; };
+  function draw() {
+    if (!results) return;
+    let list = results.slice();
+    if (sort === "size") list.sort((a, b) => b.size - a.size);
+    if (sort === "newest") list.sort((a, b) => ageDays(a.age) - ageDays(b.age));
+    const kids = [];
+    if (errors.length) kids.push(h("div", { class: "banner" }, errors.join(" · ")));
+    kids.push(list.length ? h("div", {}, h("div", { class: "section-head" }, `${list.length} results`),
+      h("div", { class: "section" }, h("div", { class: "group" }, list.map(r => {
+        const tor = r.protocol === "torrent";
+        return h("button", { class: "cell rel", onclick: () => send(r) }, h("div", { class: "main" },
+          h("div", { class: "t" }, r.title),
+          h("div", { class: "meta" }, h("span", { class: "chip " + (tor ? "info" : "ok") }, tor ? "Torrent" : "NZB"),
+            h("b", {}, fmtBytes(r.size)), r.indexer && h("span", {}, r.indexer), r.category && h("span", {}, r.category),
+            r.age && h("span", {}, r.age),
+            tor ? (r.seeders != null && h("span", { style: r.seeders ? "" : "color:var(--orange)" }, `${r.seeders} seeders`))
+              : (r.grabs != null && h("span", {}, `${r.grabs} grabs`)))));
+      }))))
+      : emptyState("Nothing found", "Try fewer words, or change the filters."));
+    out.replaceChildren(...kids);
+  }
+  async function run() {
+    const q = input.value.trim();
+    if (!q) return;
+    const n = ++seq;
+    out.replaceChildren(h("div", { class: "empty" }, h("div", { class: "spin", style: "margin:0 auto 16px" }), h("div", {}, "Asking your indexers…"),
+      h("div", { style: "font-size:13px;margin-top:6px" }, "This can take up to a minute.")));
+    try {
+      const r = await get(`/api/indexers/search?q=${enc(q)}&kind=${kind}&protocol=${proto}`);
+      if (n !== seq) return;
+      results = r.results || []; errors = r.errors || []; draw();
+    } catch (e) { if (n === seq) out.replaceChildren(errorState(e, run)); }
+  }
+  async function send(r) {
+    try { targets = targets || await get("/api/indexers/targets"); } catch (e) { errToast(e); return; }
+    const opts = (r.protocol === "torrent" ? targets.torrent : targets.usenet) || [];
+    if (!opts.length) { toast(`No ${r.protocol === "torrent" ? "torrent" : "usenet"} download client is set up`, true); return; }
+    const v = await actionSheet("Send to…", r.title, opts.map(o => ({ label: o.label, value: o.value })));
+    if (!v) return;
+    try { const res = await post("/api/indexers/grab", { id: r.id, target: v }); toast(res.message || "Sent"); }
+    catch (e) { errToast(e); }
+  }
+  drawSegs();
+  p.body.append(h("div", { style: "padding-top:8px" }, form), segKind, segProto, segSort, out);
+  setTimeout(() => input.focus(), 350);
+  return { el: p.el, title: "Search indexers" };
 }
 
 // ------------------------------------------------------------------ Files (File Station)
@@ -1423,6 +1504,15 @@ function SettingsScreen() {
     if (!writable) kids.push(h("div", { class: "banner" }, h("b", {}, "Settings are read-only. "),
       "In the gateway's docker-compose.yml change ", h("code", {}, "./config:/config:ro"), " to ", h("code", {}, "./config:/config"),
       ", then rebuild the project in Container Manager."));
+    kids.push(h("div", { class: "section-head" }, "Harbour"), h("div", { class: "section" }, h("div", { class: "group" },
+      h("a", { class: "cell", style: "--inset:57px;text-decoration:none;color:inherit", href: "/setup", target: "_blank" },
+        h("span", { class: "icon", style: "background:#2fb6a0" }, svg("gear")),
+        h("div", { class: "main" }, h("div", { class: "t" }, "Setup page"), h("div", { class: "s" }, "Start here — finds your apps and fills them in, pairs TVs · home network")), svg("chev")),
+      h("button", { class: "cell", style: "--inset:57px", onclick: () => push(EditScreen("general", 0)) }, sectionIcon("general"),
+        h("div", { class: "main" }, h("div", { class: "t" }, "General"), h("div", { class: "s" }, "Name, region, gateway PIN")), svg("chev")),
+      h("button", { class: "cell", style: "--inset:57px", onclick: () => push(PasswordScreen()) },
+        h("span", { class: "icon", style: "background:#636366" }, svg("key")), h("div", { class: "main" }, "Change password"), svg("chev"))),
+      h("div", { class: "section-foot" }, `Harbour gateway ${S.config?.version || ""} · or add services by hand below`)));
     const services = order.filter(s => schema[s].multi);
     kids.push(h("div", { class: "section-head" }, "Services"), h("div", { class: "section" }, h("div", { class: "group" },
       services.flatMap(sec => {
@@ -1439,15 +1529,6 @@ function SettingsScreen() {
       singles.map(sec => h("button", { class: "cell", style: "--inset:57px", onclick: () => push(EditScreen(sec, 0)) },
         sectionIcon(sec), h("div", { class: "main nowrap" }, h("div", { class: "t" }, schema[sec].title),
           h("div", { class: "s" }, values[sec] ? (values[sec].url || (values[sec]._set?.length ? "Set" : "")) || "Set" : "Not set up")), svg("chev"))))));
-    kids.push(h("div", { class: "section-head" }, "Harbour"), h("div", { class: "section" }, h("div", { class: "group" },
-      h("button", { class: "cell", style: "--inset:57px", onclick: () => push(EditScreen("general", 0)) }, sectionIcon("general"),
-        h("div", { class: "main" }, h("div", { class: "t" }, "General"), h("div", { class: "s" }, "Name, region, gateway PIN")), svg("chev")),
-      h("a", { class: "cell", style: "--inset:57px;text-decoration:none;color:inherit", href: "/setup", target: "_blank" },
-        h("span", { class: "icon", style: "background:#2fb6a0" }, svg("gear")),
-        h("div", { class: "main" }, h("div", { class: "t" }, "Setup page"), h("div", { class: "s" }, "Pair TVs, find my apps · home network only")), svg("chev")),
-      h("button", { class: "cell", style: "--inset:57px", onclick: () => push(PasswordScreen()) },
-        h("span", { class: "icon", style: "background:#636366" }, svg("key")), h("div", { class: "main" }, "Change password"), svg("chev"))),
-      h("div", { class: "section-foot" }, `Harbour gateway ${S.config?.version || ""}`)));
     kids.push(h("div", { class: "section" }, h("div", { class: "group" },
       h("button", { class: "cell center danger", onclick: signOut }, "Sign out"))));
     box.replaceChildren(...kids);
