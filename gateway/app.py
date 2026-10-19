@@ -2984,6 +2984,7 @@ X_POOL = ThreadPoolExecutor(max_workers=2)
 _X_JOBS = {}            # job id -> dict (newest last)
 _X_LOOKUPS = {}         # tweet id -> (time, yt-dlp info)
 _X_LOCK = threading.Lock()
+_X_SRC = {}             # job id -> (direct mp4 url, headers) — kept on the gateway
 
 
 def x_conf():
@@ -3050,7 +3051,8 @@ def _x_options(entry):
         seen.add(key)
         size = f.get("filesize") or f.get("filesize_approx") or \
             (int(f["tbr"] * 1000 / 8 * dur) if f.get("tbr") and dur else None)
-        out.append({"format": f["format_id"], "width": w, "height": hgt, "size": size})
+        out.append({"format": f["format_id"], "width": w, "height": hgt, "size": size,
+                    "_url": f.get("url"), "_headers": f.get("http_headers") or {}})
     out.sort(key=lambda o: ((o["height"] or 0) * (o["width"] or 0), o["size"] or 0), reverse=True)
     for o in out:
         short = min(o["width"] or 0, o["height"] or 0)
@@ -3062,7 +3064,7 @@ def _x_options(entry):
     return out
 
 
-def x_lookup(url):
+def x_lookup(url, public=True):
     tid, url = x_parse(url)
     hit = _X_LOOKUPS.get(tid)
     if hit and time.time() - hit[0] < 1800:
@@ -3086,6 +3088,9 @@ def x_lookup(url):
     first = entries[0] if entries else info
     videos = [{"index": i + 1, "duration": e.get("duration"), "thumbnail": e.get("thumbnail"),
                "options": _x_options(e)} for i, e in enumerate(entries)]
+    if public:
+        for v in videos:
+            v["options"] = [{k: val for k, val in o.items() if not k.startswith("_")} for o in v["options"]]
     text = (first.get("description") or info.get("description") or first.get("title") or "").strip()
     text = re.sub(r"\s*https://t\.co/\w+\s*$", "", text)
     return {"id": tid, "url": url, "text": text[:400],
@@ -3104,12 +3109,66 @@ def _x_name(meta, index, count, height):
     return f"{handle} {day} {meta['id']}{part}{size}.mp4"
 
 
+def _x_fetch_direct(job, url, headers, dest):
+    """Download exactly the MP4 the user picked (X serves each size as its own file)."""
+    job["status"] = "downloading"
+    hdr = {k: v for k, v in (headers or {}).items() if k.lower() in ("user-agent", "referer", "accept")}
+    with requests.get(url, headers=hdr, stream=True, timeout=(15, 120)) as r:
+        r.raise_for_status()
+        total = int(r.headers.get("Content-Length") or 0)
+        done = 0
+        with open(dest, "wb") as f:
+            for chunk in r.iter_content(512 * 1024):
+                f.write(chunk)
+                done += len(chunk)
+                if total:
+                    job["progress"] = min(done / total * 0.9, 0.9)
+    if os.path.getsize(dest) < 1024:
+        raise ValueError("file too small")
+    return dest
+
+
+def _x_save(job, src):
+    job["size"] = os.path.getsize(src)
+    job["status"], job["progress"] = "saving", 0.92
+    job["path"] = FILES.upload(job["folder"], job["name"], src)
+    job["status"], job["progress"] = "done", 1.0
+    log.info("saved X video %s (%s)", job["path"], fmt_size(job["size"]))
+
+
+def x_forget(job_id=None):
+    """Remove one finished download from the list, or every finished one."""
+    with _X_LOCK:
+        ids = [job_id] if job_id else list(_X_JOBS)
+        for i in ids:
+            j = _X_JOBS.get(i)
+            if j and j.get("finished"):
+                _X_JOBS.pop(i)
+                _X_SRC.pop(i, None)
+    return x_jobs()
+
+
 def _x_run(job):
     import shutil
     import tempfile
     tmp = tempfile.mkdtemp(prefix="harbour-x-", dir=os.environ.get("TMPDIR", "/tmp"))
     try:
-        args = ["-f", job["format"], "-o", os.path.join(tmp, "video.%(ext)s"), "--no-mtime"]
+        src = _X_SRC.pop(job["id"], None)
+        got = None
+        if src:
+            try:
+                got = _x_fetch_direct(job, src[0], src[1], os.path.join(tmp, "video.mp4"))
+            except Exception as e:   # fall back to yt-dlp below
+                log.info("X direct download failed (%s), using yt-dlp", e)
+                for f in os.listdir(tmp):
+                    os.remove(os.path.join(tmp, f))
+        if got:
+            _x_save(job, got)
+            return
+        fmt = job["format"]
+        if job.get("height"):   # pick by size, so the format id can't drift between lookup and download
+            fmt = f"b[height={job['height']}]/{fmt}/b"
+        args = ["-f", fmt, "-o", os.path.join(tmp, "video.%(ext)s"), "--no-mtime"]
         if job["count"] > 1:
             args += ["--playlist-items", str(job["index"])]
         else:
@@ -3127,12 +3186,7 @@ def _x_run(job):
         files_ = [os.path.join(tmp, f) for f in os.listdir(tmp) if not f.endswith(".part")]
         if not files_:
             raise ApiError("yt-dlp didn't produce a file", 502)
-        src = max(files_, key=os.path.getsize)
-        job["size"] = os.path.getsize(src)
-        job["status"], job["progress"] = "saving", 0.92
-        job["path"] = FILES.upload(job["folder"], job["name"], src)
-        job["status"], job["progress"] = "done", 1.0
-        log.info("saved X video %s (%s)", job["path"], fmt_size(job["size"]))
+        _x_save(job, max(files_, key=os.path.getsize))
     except requests.RequestException:
         job["status"], job["error"] = "failed", "Couldn't reach File Station on the NAS to save the video"
         log.warning("X download %s: File Station unreachable", job["url"])
@@ -3147,7 +3201,7 @@ def _x_run(job):
 def x_download(url, index=1, fmt=None):
     if not x_available():
         raise ApiError("X downloads need File Station set up on the gateway", 404)
-    meta = x_lookup(url)
+    meta = x_lookup(url, public=False)
     vids = meta["videos"]
     try:
         index = int(index or 1)
@@ -3167,11 +3221,15 @@ def x_download(url, index=1, fmt=None):
     FILES.check(job["folder"])   # fail now, not after the download, if the folder isn't allowed
     with _X_LOCK:
         _X_JOBS[job["id"]] = job
+        if opt.get("_url"):
+            _X_SRC[job["id"]] = (opt["_url"], opt.get("_headers") or {})
+        job["height"] = opt.get("height")
         while len(_X_JOBS) > 30:
             old = next((k for k, j in _X_JOBS.items() if j.get("finished")), None)
             if not old:
                 break
             _X_JOBS.pop(old)
+            _X_SRC.pop(old, None)
     X_POOL.submit(_x_run, job)
     return {"job": job, "message": f"Downloading to {job['folder']}"}
 
@@ -4582,6 +4640,16 @@ def x_download_route():
 @app.get("/api/x/jobs")
 def x_jobs_route():
     return jsonify(x_jobs())
+
+
+@app.delete("/api/x/jobs")
+def x_jobs_clear():
+    return jsonify(x_forget())
+
+
+@app.delete("/api/x/jobs/<job_id>")
+def x_job_delete(job_id):
+    return jsonify(x_forget(job_id))
 
 
 init()

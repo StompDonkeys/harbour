@@ -1442,14 +1442,25 @@ function XScreen() {
   const STATUS = { queued: "Waiting", downloading: "Downloading", saving: "Saving to NAS", done: "Saved", failed: "Failed" };
   function drawJobs() {
     if (!jobs.length) { jobsBox.replaceChildren(); return; }
-    jobsBox.replaceChildren(h("div", { class: "section-head" }, "Recent"), h("div", { class: "section" }, h("div", { class: "group" }, jobs.map(j => {
+    const anyFinished = jobs.some(j => ["done", "failed"].includes(j.status));
+    jobsBox.replaceChildren(h("div", { class: "section-head", style: "display:flex;align-items:center" },
+        h("span", { style: "flex:1" }, "Recent"),
+        anyFinished && h("button", { class: "navbtn", style: "height:auto;padding:0;font-size:15px;text-transform:none;letter-spacing:0", onclick: clearAll }, "Clear")),
+      h("div", { class: "section" }, h("div", { class: "group" }, jobs.map(j => {
       const pct = Math.round((j.progress || 0) * 100), done = j.status === "done", bad = j.status === "failed";
-      return h("div", { class: "cell" }, h("div", { class: "main" },
+      return h("div", { class: "cell", style: "padding-right:6px" }, h("div", { class: "main" },
         h("div", { class: "t", style: "font-size:15px;overflow-wrap:anywhere" }, j.name),
         !done && !bad && h("div", { class: "prog" }, h("i", { style: `width:${pct}%` })),
         h("div", { class: "s", style: bad ? "color:var(--red);white-space:normal" : "" },
-          bad ? j.error : [STATUS[j.status] || j.status, done ? fmtBytes(j.size) : j.status === "downloading" ? pct + "%" : ""].filter(Boolean).join(" · "))));
+          bad ? j.error : [STATUS[j.status] || j.status, done ? fmtBytes(j.size) : j.status === "downloading" ? pct + "%" : ""].filter(Boolean).join(" · "))),
+        (done || bad) && h("button", { class: "navbtn", "aria-label": "Remove from list", style: "color:var(--label-3);font-size:20px;padding:0 8px;flex:none", onclick: () => forget(j.id) }, "✕"));
     }))));
+  }
+  async function forget(id) {
+    try { const r = await api("DELETE", `/api/x/jobs/${enc(id)}`); jobs = r.jobs || []; drawJobs(); } catch (e) { errToast(e); }
+  }
+  async function clearAll() {
+    try { const r = await api("DELETE", "/api/x/jobs"); jobs = r.jobs || []; drawJobs(); toast("History cleared — the videos stay on the NAS"); } catch (e) { errToast(e); }
   }
   async function loadJobs() {
     try { const r = await get("/api/x/jobs"); jobs = r.jobs || []; S.xFolder = r.folder; drawJobs(); } catch { /* keep what we have */ }

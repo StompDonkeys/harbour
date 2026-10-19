@@ -1348,7 +1348,7 @@ if "-J" in a:
                       "upload_date": "20261018", "description": "Look at this https://t.co/abc", "duration": 20,
                       "thumbnail": "https://pbs.twimg.com/t.jpg", "formats": fmts}))
 else:
-    assert a[a.index("-f") + 1] == "http-2176", a
+    assert "http-2176" in a[a.index("-f") + 1], a
     out = a[a.index("-o") + 1].replace("%(ext)s", "mp4")
     for p in (10, 55.5, 100):
         print(f"[download]  {p}% of 5.00MiB at 1MiB/s ETA 00:01", flush=True)
@@ -1356,8 +1356,12 @@ else:
 '''
 
 
+@responses.activate
 def test_x_download(client, monkeypatch, tmp_path):
     import time as _t
+    # The chosen size is fetched directly; the first time X refuses, so yt-dlp is the fallback.
+    responses.get("https://video.twimg.com/ext_tw_video/1/pu/vid/1280x720/b.mp4", status=403)
+    responses.get("https://video.twimg.com/ext_tw_video/1/pu/vid/1280x720/b.mp4", body=b"\1" * 5000)
     (tmp_path / "yt_dlp").mkdir()
     (tmp_path / "yt_dlp" / "__init__.py").write_text("")
     (tmp_path / "yt_dlp" / "__main__.py").write_text(FAKE_YTDLP)
@@ -1395,6 +1399,21 @@ def test_x_download(client, monkeypatch, tmp_path):
                      "size": 1234}
     stale = client.post("/api/x/download", headers=H, json={"url": r["url"], "format": "http-9999"})
     assert stale.status_code == 400
+    assert "_url" not in opts[0]                                              # direct links stay on the gateway
+
+    # Second time: the exact file the user picked is downloaded directly.
+    j = client.post("/api/x/download", headers=H, json={"url": r["url"], "index": 1, "format": "http-2176"}).get_json()["job"]
+    for _ in range(100):
+        job = next(x for x in client.get("/api/x/jobs", headers=H).get_json()["jobs"] if x["id"] == j["id"])
+        if job["status"] in ("done", "failed"):
+            break
+        _t.sleep(0.1)
+    assert job["status"] == "done" and saved["size"] == 5000, job
+
+    # History: remove one, then clear the rest.
+    left = client.delete(f"/api/x/jobs/{j['id']}", headers=H).get_json()["jobs"]
+    assert all(x["id"] != j["id"] for x in left) and left
+    assert client.delete("/api/x/jobs", headers=H).get_json()["jobs"] == []
 
 
 @responses.activate
