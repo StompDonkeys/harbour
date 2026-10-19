@@ -7,6 +7,11 @@ on:
       - "android-v3/**"
       - ".github/workflows/build-apk-v3.yml"
   workflow_dispatch:
+    inputs:
+      bridge:
+        description: "Also publish as a v2.* release so Harbour v2 can update itself to V3"
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -74,4 +79,14 @@ jobs:
           tag_name: v${{ env.VERSION_NAME }}
           name: Harbour V3 ${{ env.VERSION_NAME }}
           make_latest: false
+          files: dist/HarbourV3.apk
+
+      - name: Bridge release for Harbour v2
+        if: ${{ inputs.bridge }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v2.0.${{ env.VERSION_CODE }}
+          name: Upgrade to Harbour V3 (${{ env.VERSION_NAME }})
+          make_latest: false
+          body: Lets Harbour v2's in-app updater install Harbour V3. Same app, keeps your settings.
           files: dist/HarbourV3.apk
