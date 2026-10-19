@@ -1635,7 +1635,7 @@ function SettingsScreen() {
       S.config?.xdl && h("button", { class: "cell", style: "--inset:57px", onclick: () => push(XSignInScreen()) },
         h("span", { class: "icon", style: "background:#000" }, svg("key")),
         h("div", { class: "main nowrap" }, h("div", { class: "t" }, "X sign-in"),
-          h("div", { class: "s" }, "For adult or sign-in-only videos")), svg("chev")))));
+          h("div", { class: "s" }, "For sensitive or sign-in-only videos")), svg("chev")))));
     kids.push(h("div", { class: "section" }, h("div", { class: "group" },
       h("button", { class: "cell center danger", onclick: signOut }, "Sign out"))));
     box.replaceChildren(...kids);
@@ -1790,11 +1790,11 @@ function XSignInScreen() {
         h("b", { style: "color:var(--tint);flex:none" }, `${i + 1}.`), h("span", {}, t)))),
       h("div", { class: "section-foot" }, "Chrome or Firefox work too: Developer tools → Application/Storage → Cookies. "
         + "These two values are a key to your X account — they stay on the gateway and are never sent back to the phone. "
-        + "They last until you log out of X in that browser; if adult videos stop working, paste fresh ones.")));
+        + "They last until you log out of X in that browser; if sign-in-only videos stop working, paste fresh ones.")));
   async function refresh() {
     try {
       const r = await get("/api/x/cookies");
-      status.textContent = r.set ? `Signed in · saved ${new Date(r.updated * 1000).toLocaleDateString()}. Paste new values to replace it.` : "Not signed in. Sign-in-only and adult posts won't download.";
+      status.textContent = r.set ? `Signed in · saved ${new Date(r.updated * 1000).toLocaleDateString()}. Paste new values to replace it.` : "Not signed in. Sign-in-only and sensitive posts won't download.";
       removeGroup.style.display = r.set ? "" : "none";
     } catch (e) { status.textContent = e.message; }
   }
