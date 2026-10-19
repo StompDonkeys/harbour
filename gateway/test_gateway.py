@@ -3,6 +3,7 @@ import json
 import os
 import re
 import tempfile
+from urllib.parse import quote
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -1394,3 +1395,24 @@ def test_x_download(client, monkeypatch, tmp_path):
                      "size": 1234}
     stale = client.post("/api/x/download", headers=H, json={"url": r["url"], "format": "http-9999"})
     assert stale.status_code == 400
+
+
+@responses.activate
+def test_file_play_and_stream(client):
+    responses.add(responses.POST, "http://nas:5000/webapi/auth.cgi",
+                  json={"success": True, "data": {"sid": "S1"}})
+    got = {}
+
+    def dl(req):
+        got["url"], got["range"] = req.url, req.headers.get("Range")
+        return 206, {"Content-Type": "video/x-matroska", "Content-Range": "bytes 0-3/10",
+                     "Content-Length": "4"}, b"abcd"
+    responses.add_callback(responses.GET, "http://nas:5000/webapi/entry.cgi", callback=dl)
+    p = client.get("/api/play?ref=" + quote("file:/video/Some Film.mkv"), headers=H).get_json()
+    assert p["ratingKey"] == "" and p["title"] == "Some Film" and "/api/files/stream?" in p["url"]
+    assert "t=" in p["url"]
+    r = client.get("/api/files/stream?path=" + quote("/video/Some Film.mkv"), headers={**H, "Range": "bytes=0-3"})
+    assert r.status_code == 206 and r.data == b"abcd" and r.headers["Content-Range"] == "bytes 0-3/10"
+    assert "SYNO.FileStation.Download" in got["url"] and got["range"] == "bytes=0-3"
+    # Outside the allowed shares is refused.
+    assert client.get("/api/play?ref=" + quote("file:/homes/x.mkv"), headers=H).status_code == 403

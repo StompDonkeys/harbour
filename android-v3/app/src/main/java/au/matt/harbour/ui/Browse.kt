@@ -38,13 +38,14 @@ import au.matt.harbour.data.search
  * For Seerr it's a TMDB search.
  */
 @Composable
-fun BrowseScreen(svc: ServiceInfo, searchFirst: Boolean, onOpen: (String) -> Unit) {
+fun BrowseScreen(svc: ServiceInfo, searchFirst: Boolean, onOpen: (String) -> Unit, externalQuery: String? = null) {
     val gw = LocalGateway.current
     val cache = LocalCache.current
     val remote = svc.isDiscover
 
-    var query by rememberSaveable { mutableStateOf("") }
-    var asking by rememberSaveable { mutableStateOf(searchFirst) }
+    var ownQuery by rememberSaveable { mutableStateOf("") }
+    val query = externalQuery ?: ownQuery
+    var asking by rememberSaveable { mutableStateOf(searchFirst && externalQuery == null) }
     var all by remember { mutableStateOf(if (remote) null else cache.browse[svc.key]) }
     var results by remember { mutableStateOf<List<MediaItem>?>(null) }
     var loading by remember { mutableStateOf(false) }
@@ -86,7 +87,7 @@ fun BrowseScreen(svc: ServiceInfo, searchFirst: Boolean, onOpen: (String) -> Uni
     val target = lastFocus ?: shown.firstOrNull()?.key
 
     Column(Modifier.fillMaxSize()) {
-        Row(
+        if (externalQuery == null) Row(
             Modifier
                 .fillMaxWidth()
                 .padding(start = 48.dp, end = 48.dp, top = 30.dp, bottom = 6.dp),
@@ -111,7 +112,7 @@ fun BrowseScreen(svc: ServiceInfo, searchFirst: Boolean, onOpen: (String) -> Uni
             TvButton(if (query.isBlank()) "🔍  Search" else "🔍  “$query”", { asking = true })
             if (query.isNotBlank()) {
                 TvButton("Clear", {
-                    query = ""
+                    ownQuery = ""
                     lastFocus = null
                     grabPending = true
                 })
@@ -166,7 +167,7 @@ fun BrowseScreen(svc: ServiceInfo, searchFirst: Boolean, onOpen: (String) -> Uni
             imeAction = ImeAction.Search,
             onDone = {
                 asking = false
-                query = it.trim()
+                ownQuery = it.trim()
                 lastFocus = null
                 focused = null
                 grabPending = true

@@ -26,7 +26,7 @@ import time
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
-from urllib.parse import quote, urlsplit
+from urllib.parse import quote, urlencode, urlsplit
 
 import requests
 from flask import Flask, Response, has_request_context, jsonify, request, stream_with_context
@@ -2532,6 +2532,33 @@ class FileStation:
             raise ApiError("That isn't a valid name")
         return name
 
+    def stream(self, path, range_header=None):
+        """Open a NAS file through File Station's download API for streaming (Range passed through)."""
+        path = self.check(path)
+        for attempt in range(2):
+            with self.lock:
+                if not self.sid:
+                    self.login()
+                sid = self.sid
+            hdr = {"Range": range_header} if range_header else {}
+            r = requests.get(f"{self.url}/webapi/entry.cgi", params={
+                "api": "SYNO.FileStation.Download", "version": "2", "method": "download",
+                "path": json.dumps([path], ensure_ascii=False), "mode": "open", "_sid": sid,
+            }, headers=hdr, stream=True, timeout=(10, 120), verify=self.verify)
+            if r.headers.get("Content-Type", "").startswith(("application/json", "text/plain")) and r.status_code == 200:
+                # An error comes back as JSON instead of the file.
+                try:
+                    err = (json.loads(r.content or b"{}").get("error") or {}).get("code")
+                except ValueError:
+                    return r
+                if err in (106, 107, 119) and attempt == 0:
+                    with self.lock:
+                        self.sid = None
+                    continue
+                raise ApiError(FS_ERRORS.get(err) or f"File Station error {err}", 400)
+            return r
+        raise ApiError("File Station session error", 502)
+
     def listing(self, path):
         if not path:
             d = self.call("SYNO.FileStation.List", 2, "list_share", sort_by="name",
@@ -4121,6 +4148,8 @@ def play():
     ref = request.args.get("ref", "")
     start = ref.endswith("|start") or request.args.get("start") == "1"
     ref = ref.split("|")[0]
+    if ref.startswith("file:"):
+        return jsonify(file_play_info(ref[5:]))
     token = plex_token()
     return jsonify(PLEX.play_info(ref, token, transcode=request.args.get("transcode") == "1", start=start))
 
@@ -4255,6 +4284,37 @@ def files():
 @app.get("/api/files/list")
 def files_list():
     return jsonify(files().listing(request.args.get("path", "")))
+
+
+MEDIA_TYPES = {".mp4": "video/mp4", ".m4v": "video/mp4", ".mkv": "video/x-matroska", ".webm": "video/webm",
+               ".avi": "video/x-msvideo", ".mov": "video/quicktime", ".ts": "video/mp2t", ".m2ts": "video/mp2t",
+               ".wmv": "video/x-ms-wmv", ".mpg": "video/mpeg", ".mpeg": "video/mpeg", ".mp3": "audio/mpeg",
+               ".m4a": "audio/mp4", ".flac": "audio/flac", ".aac": "audio/aac", ".ogg": "audio/ogg",
+               ".opus": "audio/ogg", ".wav": "audio/wav"}
+
+
+@app.get("/api/files/stream")
+def files_stream():
+    """Stream a video/audio file from the NAS (the TV player seeks with Range requests)."""
+    path = request.args.get("path", "")
+    r = files().stream(path, request.headers.get("Range"))
+    headers = {"Accept-Ranges": "bytes"}
+    for h in ("Content-Length", "Content-Range"):
+        if r.headers.get(h):
+            headers[h] = r.headers[h]
+    ext = posixpath.splitext(path)[1].lower()
+    mime = MEDIA_TYPES.get(ext) or r.headers.get("Content-Type") or "application/octet-stream"
+    return Response(stream_with_context(r.iter_content(256 * 1024)), status=r.status_code,
+                    mimetype=mime, headers=headers, direct_passthrough=True)
+
+
+def file_play_info(path):
+    files().check(path)
+    name = posixpath.basename(path)
+    token = request.headers.get("X-Token") or request.args.get("t") or ""
+    url = request.host_url.rstrip("/") + "/api/files/stream?" + urlencode({"path": path, "t": token})
+    return {"ref": "file:" + path, "ratingKey": "", "url": url, "hls": False, "offset": 0, "duration": 0,
+            "title": posixpath.splitext(name)[0], "subtitle": posixpath.dirname(path), "badges": []}
 
 
 @app.post("/api/files/op")

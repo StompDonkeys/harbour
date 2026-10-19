@@ -53,12 +53,12 @@ Make sure your Docker user has **Read/Write** on that folder (File Station → f
 | Menu | What you get |
 |---|---|
 | **Home** | Today's and this week's episodes and movies, library stats, Ready to watch, Coming up, New movies, Trending. |
-| **Search / Discover** | Find any movie or show (TMDB via Jellyseerr); trending, popular, upcoming. |
+| **Search** | One search box, two answers: **Movies & TV** (TMDB via Jellyseerr) or **Indexers** (Prowlarr and your Newznab indexers directly; send a release to NZBGet or qBittorrent). |
+| **Discover** | Trending, popular, upcoming. |
 | **Movies / TV** | Your Radarr and Sonarr libraries merged. One page per title: ratings, trailers (played in Harbour), cast, where it streams, what you own in HD/4K, play in Plex, auto/manual search, monitor, delete, request. Seasons → episodes with per-episode actions. |
 | **Calendar** | Month view of releases; click an episode to manage it. |
-| **Indexers** | Search Prowlarr and your Newznab indexers directly; send to NZBGet or qBittorrent. |
 | **Downloads** | NZBGet + qBittorrent queues: pause, resume, delete. |
-| **Files** | Browse, move, copy, rename and delete on the NAS. |
+| **Files** | Browse, move, copy, rename and delete on the NAS. Press OK on a video or audio file to play it on the TV. |
 | **Settings** | Pairing, Plex profile, updates, demo screen recording (saved to the NAS). |
 
 ## iPhone app

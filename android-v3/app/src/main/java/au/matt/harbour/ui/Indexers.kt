@@ -51,15 +51,16 @@ import kotlinx.coroutines.launch
  * indexers — and send a result straight to NZBGet or qBittorrent.
  */
 @Composable
-fun IndexerScreen() {
+fun IndexerScreen(externalQuery: String? = null) {
     val gw = LocalGateway.current
     val toaster = LocalToaster.current
     val scope = rememberCoroutineScope()
-    var query by rememberSaveable { mutableStateOf("") }
+    var ownQuery by rememberSaveable { mutableStateOf("") }
+    val query = externalQuery ?: ownQuery
     var kind by rememberSaveable { mutableStateOf("all") }        // all | movies | tv
     var protocol by rememberSaveable { mutableStateOf("all") }    // all | usenet | torrent
     var sort by rememberSaveable { mutableStateOf("best") }       // best | size | newest
-    var asking by rememberSaveable { mutableStateOf(true) }
+    var asking by rememberSaveable { mutableStateOf(externalQuery == null) }
     var results by remember { mutableStateOf<List<IdxResult>?>(null) }
     var errors by remember { mutableStateOf<List<String>>(emptyList()) }
     var loading by remember { mutableStateOf(false) }
@@ -72,8 +73,8 @@ fun IndexerScreen() {
     val first = remember { FocusRequester() }
     val searchBtn = remember { FocusRequester() }
 
-    LaunchedEffect(run) {
-        if (query.isBlank() || run == 0) return@LaunchedEffect
+    LaunchedEffect(run, externalQuery) {
+        if (query.isBlank() || (externalQuery == null && run == 0)) return@LaunchedEffect
         loading = true
         failed = null
         results = null
@@ -106,7 +107,7 @@ fun IndexerScreen() {
     }
 
     Column(Modifier.fillMaxSize().padding(start = 40.dp, end = 36.dp, top = 6.dp)) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
+        if (externalQuery == null) Row(verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
                 Text("Indexer search", fontSize = 26.sp, fontWeight = FontWeight.Bold)
                 Text(
@@ -148,7 +149,7 @@ fun IndexerScreen() {
                     Text("Asking your indexers… ${elapsed}s", color = HColors.TextDim, fontSize = 15.sp)
                 }
                 err != null -> ErrorPanel(err, onRetry = { run++ })
-                results == null -> Text("Press Search and type what you're after.", color = HColors.TextDim, fontSize = 15.sp)
+                results == null -> Text(if (externalQuery != null) "Type a search above." else "Press Search and type what you're after.", color = HColors.TextDim, fontSize = 15.sp)
                 shown.isEmpty() -> Text("Nothing found. Try fewer words, or switch the filters.",
                     color = HColors.TextDim, fontSize = 15.sp)
                 else -> LazyColumn(
@@ -171,7 +172,7 @@ fun IndexerScreen() {
             onDone = {
                 asking = false
                 if (it.isNotBlank()) {
-                    query = it.trim()
+                    ownQuery = it.trim()
                     run++
                 }
             },
@@ -228,7 +229,7 @@ private fun ageDays(age: String?): Double {
 }
 
 @Composable
-private fun FilterChip(text: String, on: Boolean, onClick: () -> Unit) {
+internal fun FilterChip(text: String, on: Boolean, onClick: () -> Unit) {
     FocusBox(onClick = onClick, shape = RoundedCornerShape(999.dp), focusedScale = 1.06f, borderWidth = 0.dp) { f ->
         Text(
             text, fontSize = 13.sp, maxLines = 1,

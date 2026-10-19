@@ -105,6 +105,16 @@ private fun DashboardContent(hub: ServiceInfo, d: Dash, onOpen: (String) -> Unit
     }
     val firstFocus = remember { FocusRequester() }
     var grabbed by androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf(false) }
+    // Home picked again from the menu: back to the top and onto today's first item.
+    val reselect = LocalReselect.current
+    var seenReselect by androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf(reselect) }
+    LaunchedEffect(reselect) {
+        if (reselect != seenReselect) {
+            seenReselect = reselect
+            runCatching { listState.scrollToItem(0) }
+            grabbed = false
+        }
+    }
 
     Box(Modifier.fillMaxSize()) {
         Backdrop(art, dim = 1.3f)

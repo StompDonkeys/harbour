@@ -53,7 +53,7 @@ import java.util.Locale
 private data class Transfer(val op: String, val path: String, val name: String, val fromDir: String)
 
 @Composable
-fun FilesScreen() {
+fun FilesScreen(onPlay: ((String) -> Unit)? = null) {
     val gw = LocalGateway.current
     val toaster = LocalToaster.current
     val scope = rememberCoroutineScope()
@@ -209,7 +209,12 @@ fun FilesScreen() {
                                 entry = e,
                                 focusRequester = fr,
                                 onClick = {
-                                    if (e.isDir) open(e.path) else if (!picking) menuFor = e
+                                    when {
+                                        e.isDir -> open(e.path)
+                                        picking -> {}
+                                        onPlay != null && isPlayable(e.name) -> onPlay(e.path)
+                                        else -> menuFor = e
+                                    }
                                 },
                                 onMenu = if (!picking && !atRoot) ({ menuFor = e }) else null,
                                 onFocused = { focusName = e.name },
@@ -221,7 +226,7 @@ fun FilesScreen() {
         }
         Text(
             if (picking) "OK: open folder   ·   Back: up a level"
-            else "OK: open   ·   ☰ Menu button: move, copy, rename, delete   ·   Back: up a level",
+            else "OK: open / play   ·   ☰ Menu button: move, copy, rename, delete   ·   Back: up a level",
             color = HColors.TextDim, fontSize = 12.sp,
             modifier = Modifier.padding(vertical = 10.dp),
         )
@@ -417,3 +422,8 @@ private fun fmtSize(bytes: Long): String {
 
 private fun fmtDate(epochSeconds: Long): String =
     if (epochSeconds <= 0) "" else SimpleDateFormat("d MMM yyyy", Locale.getDefault()).format(Date(epochSeconds * 1000))
+
+private val PlayableExt = setOf("mp4", "m4v", "mkv", "webm", "avi", "mov", "ts", "m2ts", "wmv", "mpg", "mpeg",
+    "mp3", "m4a", "flac", "aac", "ogg", "opus", "wav")
+
+internal fun isPlayable(name: String) = name.substringAfterLast('.', "").lowercase() in PlayableExt

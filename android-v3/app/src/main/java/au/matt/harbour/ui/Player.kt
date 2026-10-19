@@ -128,6 +128,7 @@ fun PlayerScreen(ref: String, onExit: () -> Unit) {
 
     fun report(state: String) {
         val i = info ?: return
+        if (i.ratingKey.isBlank()) return   // a NAS file, not a Plex item
         val pos = player.currentPosition
         val dur = player.duration.takeIf { it > 0 } ?: i.duration
         scope.launch { runCatching { gw.plexProgress(i.ratingKey, state, pos, dur) } }

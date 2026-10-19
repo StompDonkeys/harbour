@@ -27,6 +27,8 @@ import androidx.compose.animation.scaleIn
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.focusGroup
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
@@ -42,6 +44,8 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.compositionLocalOf
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
@@ -55,6 +59,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusDirection
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.focusRequester
@@ -73,8 +78,14 @@ import au.matt.harbour.data.ServiceInfo
 import au.matt.harbour.data.UpdateInfo
 import au.matt.harbour.data.Updater
 import au.matt.harbour.data.config
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import androidx.compose.ui.platform.LocalFocusManager
 import au.matt.harbour.data.home
 import au.matt.harbour.data.report
+
+/** Bumps when the open menu section is picked again, so its screen can re-take focus. */
+val LocalReselect = compositionLocalOf { 0 }
 
 sealed interface Screen {
     data class Library(val svc: ServiceInfo) : Screen
@@ -89,6 +100,7 @@ sealed interface Screen {
     data class Season(val svc: ServiceInfo, val showId: String, val number: Int, val focusEpisode: Int? = null) : Screen
     data class Trailer(val key: String, val title: String) : Screen
     data object Indexers : Screen
+    data object Search : Screen
     data object Downloads : Screen
     data object Files : Screen
     data object Settings : Screen
@@ -247,7 +259,7 @@ private fun MainShell(config: GatewayConfig, settings: @Composable () -> Unit, u
     val items = remember(config) {
         buildList {
             if (v2 && hub != null) {
-                add(NavItem("Search", Screen.Browse(hub, true), Icons.Filled.Search))
+                add(NavItem("Search", Screen.Search, Icons.Filled.Search))
                 add(NavItem("Home", Screen.Dashboard, Icons.Filled.Home))
                 config.services.firstOrNull { it.kind == "seerr" }?.let { add(NavItem("Discover", Screen.Library(it), HIcons.Explore)) }
                 config.libraries.forEach { add(NavItem(it.name, Screen.Library(it), iconFor(it))) }
@@ -255,7 +267,8 @@ private fun MainShell(config: GatewayConfig, settings: @Composable () -> Unit, u
                 config.services.forEach { add(NavItem(it.name, Screen.Library(it), iconFor(it))) }
             }
             if (config.calendar) add(NavItem("Calendar", Screen.Calendar, HIcons.Calendar))
-            if (config.indexers) add(NavItem("Indexers", Screen.Indexers, HIcons.ManageSearch))
+            // With the hub, indexer search lives inside Search (Movies & TV | Indexers).
+            if (config.indexers && !v2) add(NavItem("Indexers", Screen.Indexers, HIcons.ManageSearch))
             if (config.downloads) add(NavItem("Downloads", Screen.Downloads, HIcons.Download))
             if (config.files) add(NavItem("Files", Screen.Files, HIcons.Folder))
             add(NavItem("Settings", Screen.Settings, Icons.Filled.Settings))
@@ -268,6 +281,9 @@ private fun MainShell(config: GatewayConfig, settings: @Composable () -> Unit, u
     var railFocused by remember { mutableStateOf(false) }
     val contentFocus = remember { FocusRequester() }
     val holder = rememberSaveableStateHolder()
+    val scope = rememberCoroutineScope()
+    val focusManager = LocalFocusManager.current
+    var reselect by remember { mutableIntStateOf(0) }
     var backdrop by remember { mutableStateOf<String?>(null) }
 
     fun selectTab(i: Int) {
@@ -275,8 +291,19 @@ private fun MainShell(config: GatewayConfig, settings: @Composable () -> Unit, u
             tabIndex = i
             stack.clear()
             stack.add(items[i].root)
+        } else {
+            reselect++   // same section again: let the screen put focus back on itself
         }
         runCatching { contentFocus.requestFocus() }
+        // If nothing in the screen took focus, the menu would stay open. Nudge focus out of it.
+        scope.launch {
+            delay(150)
+            if (railFocused) {
+                runCatching { contentFocus.requestFocus() }
+                delay(50)
+                if (railFocused) focusManager.moveFocus(FocusDirection.Right)
+            }
+        }
     }
 
     fun push(s: Screen) = stack.add(s)
@@ -313,7 +340,8 @@ private fun MainShell(config: GatewayConfig, settings: @Composable () -> Unit, u
     val showRail = stack.size == 1
     val inset by animateDpAsState(if (showRail) RailCollapsed else 0.dp, tween(280), label = "inset")
 
-    CompositionLocalProvider(LocalBackdrop provides backdrop, LocalBackdropSink provides { backdrop = it }) {
+    CompositionLocalProvider(LocalBackdrop provides backdrop, LocalBackdropSink provides { backdrop = it },
+        LocalReselect provides reselect) {
         Box(Modifier.fillMaxSize().background(HColors.Bg)) {
             Box(
                 Modifier
@@ -424,8 +452,13 @@ private fun ScreenContent(
         Screen.Calendar -> CalendarScreen(onOpen = { e -> open(null, calTarget(e)) })
         is Screen.CalendarDay -> CalendarScreen(onOpen = { e -> open(null, calTarget(e)) }, initialDate = screen.date)
         Screen.Indexers -> TopInset { IndexerScreen() }
+        Screen.Search -> SearchScreen(
+            hub = config.services.first { it.kind == "hub" },
+            indexers = config.indexers,
+            onOpen = { id -> open(null, id) },
+        )
         Screen.Downloads -> TopInset { DownloadsScreen() }
-        Screen.Files -> TopInset { FilesScreen() }
+        Screen.Files -> TopInset { FilesScreen(onPlay = { path -> play("file:$path") }) }
         Screen.Settings -> TopInset { settings() }
     }
 }
@@ -490,7 +523,7 @@ private fun Rail(
                     } else false
                 }
                 .focusGroup()
-                .padding(horizontal = 12.dp, vertical = 22.dp),
+                .padding(horizontal = 12.dp, vertical = 18.dp),
             verticalArrangement = Arrangement.spacedBy(4.dp),
         ) {
             Row(Modifier.height(40.dp).padding(start = 10.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -507,10 +540,20 @@ private fun Rail(
                         modifier = Modifier.graphicsLayer { alpha = scrim })
                 }
             }
-            Spacer(Modifier.height(14.dp))
-            items.forEachIndexed { i, item ->
-                if (i == items.lastIndex) Spacer(Modifier.weight(1f))
-                RailItem(item, i == selected, width > 140.dp, scrim, i == dotOn, requesters[i]) { onSelect(i) }
+            Spacer(Modifier.height(10.dp))
+            // Everything but Settings scrolls if it doesn't fit; Settings stays pinned at the bottom.
+            Column(
+                Modifier.weight(1f).verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                items.forEachIndexed { i, item ->
+                    if (i != items.lastIndex) {
+                        RailItem(item, i == selected, width > 140.dp, scrim, i == dotOn, requesters[i]) { onSelect(i) }
+                    }
+                }
+            }
+            items.lastIndex.let { i ->
+                RailItem(items[i], i == selected, width > 140.dp, scrim, i == dotOn, requesters[i]) { onSelect(i) }
             }
         }
     }
@@ -537,7 +580,7 @@ private fun RailItem(
         Row(
             Modifier
                 .fillMaxWidth()
-                .height(44.dp)
+                .height(42.dp)
                 .background(
                     when {
                         f -> HColors.Text
