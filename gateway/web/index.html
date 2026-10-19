@@ -276,6 +276,14 @@ button.cell:active, .cell.tap:active { background: var(--cell-2); }
 .client .t { font-weight: 600; }
 .client .s { font-size: 13px; color: var(--label-2); margin-top: 2px; }
 .client .speed { font-size: 22px; font-weight: 700; font-variant-numeric: tabular-nums; letter-spacing: -.2px; }
+.act-poster { width: 54px; height: 81px; flex: none; border-radius: 6px; overflow: hidden; background: var(--fill); }
+.act-poster img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.act-poster.sm { width: 40px; height: 60px; border-radius: 5px; }
+.act-meta { font-size: 13px; color: var(--label-2); margin-top: 3px; line-height: 1.35; }
+.act-chip { display: inline-block; font-size: 11px; font-weight: 600; padding: 2px 7px; border-radius: 6px; background: var(--fill); color: var(--label-2); margin: 5px 5px 0 0; }
+.act-chip.tx { background: rgba(255,149,0,.18); color: #ff9500; }
+.act-chip.dp { background: rgba(52,199,89,.16); color: var(--green); }
+.act-rank { width: 22px; flex: none; text-align: center; font-weight: 700; color: var(--label-3); font-size: 15px; }
 .prog { height: 4px; border-radius: 2px; background: var(--fill); margin-top: 7px; overflow: hidden; }
 .prog i { display: block; height: 100%; background: var(--tint); border-radius: 2px; transition: width .6s; }
 .prog.paused i { background: var(--label-3); }
@@ -811,9 +819,153 @@ function LibraryScreen() {
     } catch (e) { content.replaceChildren(errorState(e, () => load())); }
   }
   if (services.length > 1) drawPills();
-  p.body.append(search.el, services.length > 1 ? pills : "", content);
+  const activityCell = S.config?.activity ? activityEntry() : null;
+  p.body.append(search.el, activityCell ? activityCell.el : "", services.length > 1 ? pills : "", content);
   load();
-  return { el: p.el, title: "Home", refreshIfStale() { if (Date.now() - loadedAt > 60000 && !search.input.value) load(); } };
+  return { el: p.el, title: "Home", refreshIfStale() { activityCell?.refresh(); if (Date.now() - loadedAt > 60000 && !search.input.value) load(); } };
+}
+
+// ------------------------------------------------------------------ Plex activity (Tautulli)
+/** The Home screen's "Plex activity" row: how many are watching right now. */
+function activityEntry() {
+  const sub = h("div", { class: "s" }, "Who's watching, history and top titles");
+  const el = h("div", { class: "section", style: "margin-top:4px" }, h("div", { class: "group" },
+    h("button", { class: "cell", style: "--inset:57px", onclick: () => push(ActivityScreen()) },
+      h("span", { class: "icon", style: "background:#e5a00d" }, svg("play")),
+      h("div", { class: "main" }, h("div", { class: "t" }, "Plex activity"), sub), svg("chev"))));
+  let at = 0;
+  async function refresh() {
+    if (Date.now() - at < 20000) return; at = Date.now();
+    try {
+      const a = await get("/api/activity");
+      sub.textContent = a.count ? `${a.count} streaming now · ${a.streams.map(x => x.user).filter((u, i, l) => u && l.indexOf(u) === i).join(", ")}`
+        : "Nobody's watching right now";
+    } catch { /* leave the default text */ }
+  }
+  refresh();
+  return { el, refresh };
+}
+
+const ago = t => {
+  if (!t) return "";
+  const s = Date.now() / 1000 - t;
+  if (s < 90) return "just now";
+  if (s < 3600) return `${Math.round(s / 60)} min ago`;
+  if (s < 86400) return `${Math.round(s / 3600)} h ago`;
+  if (s < 7 * 86400) return new Date(t * 1000).toLocaleDateString(undefined, { weekday: "short" }) + " " +
+    new Date(t * 1000).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+  return fmtDate(t);
+};
+const fmtLen = s => { s = Math.round(s || 0); const hr = Math.floor(s / 3600), m = Math.round(s % 3600 / 60); return hr ? `${hr}h ${m}m` : `${m}m`; };
+const fmtKbps = k => k >= 1000 ? `${(k / 1000).toFixed(1)} Mbps` : `${k || 0} kbps`;
+function actPoster(url, sm) {
+  const box = h("div", { class: "act-poster" + (sm ? " sm" : "") });
+  if (url) { const im = h("img", { src: url, alt: "", loading: "lazy" }); im.onerror = () => im.remove(); box.append(im); }
+  return box;
+}
+const decisionChip = d => d && h("span", { class: "act-chip " + (d === "Transcode" ? "tx" : d === "Direct play" ? "dp" : "") }, d);
+
+/** Plex activity from Tautulli: Now playing, History, Top. */
+function ActivityScreen() {
+  const p = page({ title: "Plex activity", back: prevTitle() });
+  let mode = "now", timer = null, visible = false;
+  const seg = h("div", { class: "seg", style: "margin:10px 16px 14px" });
+  const box = h("div", {});
+  const drawSeg = () => seg.replaceChildren(...[["now", "Now playing"], ["history", "History"], ["stats", "Top"]].map(([k, l]) =>
+    h("button", { class: k === mode ? "on" : "", onclick: () => { if (mode !== k) { mode = k; drawSeg(); show(); } } }, l)));
+  drawSeg();
+  p.body.append(seg, box);
+
+  // --- now playing
+  async function loadNow(quiet) {
+    if (!quiet) box.replaceChildren(spinner());
+    try {
+      const a = await get("/api/activity");
+      if (mode !== "now") return;
+      if (!a.streams.length) { box.replaceChildren(emptyState("Nobody's watching", "Streams show up here as soon as someone presses play.")); return; }
+      box.replaceChildren(
+        h("div", { class: "section-head" }, `${a.count} stream${a.count === 1 ? "" : "s"} · ${fmtKbps(a.bandwidth)}` +
+          (a.wan ? ` (${fmtKbps(a.wan)} remote)` : "")),
+        h("div", { class: "section" }, h("div", { class: "group" }, a.streams.map(x =>
+          h("div", { class: "cell", style: "align-items:flex-start;padding-top:12px;padding-bottom:12px;gap:12px" },
+            actPoster(x.poster),
+            h("div", { class: "main", style: "padding:0" },
+              h("div", { class: "t", style: "font-weight:600" }, x.title),
+              x.subtitle && h("div", { class: "act-meta", style: "margin-top:1px" }, x.subtitle),
+              h("div", { class: "act-meta" }, [x.user, x.player || x.platform].filter(Boolean).join(" · ")),
+              h("div", { class: "prog" + (x.state === "paused" ? " paused" : "") }, h("i", { style: `width:${x.progress || 0}%` })),
+              h("div", { class: "act-meta" }, [x.state === "paused" ? "⏸ Paused" : x.state === "buffering" ? "Buffering…" : "▶ Playing",
+                x.duration ? `${fmtDur(x.position)} / ${fmtDur(x.duration)}` : `${x.progress}%`].join(" · ")),
+              h("div", {}, decisionChip(x.decision), x.quality && h("span", { class: "act-chip" }, x.quality),
+                x.bandwidth ? h("span", { class: "act-chip" }, fmtKbps(x.bandwidth)) : null,
+                x.location && h("span", { class: "act-chip" }, x.location))))))));
+    } catch (e) { if (!quiet) box.replaceChildren(errorState(e, () => loadNow())); }
+  }
+
+  // --- history
+  let users = null, who = "", hist = [], total = 0;
+  async function loadHistory(more) {
+    if (!more) { hist = []; box.replaceChildren(spinner()); }
+    try {
+      if (!users) users = (await get("/api/activity/users")).users || [];
+      const r = await get(`/api/activity/history?start=${hist.length}&length=40${who ? "&user=" + enc(who) : ""}`);
+      if (mode !== "history") return;
+      hist = hist.concat(r.items || []); total = r.total || hist.length;
+      drawHistory();
+    } catch (e) { box.replaceChildren(errorState(e, () => loadHistory())); }
+  }
+  function drawHistory() {
+    const pills = h("div", { class: "pills" }, [{ id: "", name: "Everyone" }, ...users].map(u =>
+      h("button", { class: String(u.id) === who ? "on" : "", onclick: () => { who = String(u.id); loadHistory(); } }, u.name)));
+    const rows = hist.map(x => h("div", { class: "cell", style: "gap:12px;padding-top:8px;padding-bottom:8px" },
+      actPoster(x.poster, true),
+      h("div", { class: "main", style: "padding:0" },
+        h("div", { class: "t" }, x.title),
+        x.subtitle && h("div", { class: "act-meta", style: "margin-top:0" }, x.subtitle),
+        h("div", { class: "act-meta" }, [x.user, ago(x.started), x.watched ? fmtLen(x.watched) : "", x.percent ? `${x.percent}%` : ""].filter(Boolean).join(" · ")),
+        h("div", { class: "act-meta", style: "margin-top:1px" }, [x.player || x.platform, x.decision, x.location].filter(Boolean).join(" · "))),
+      x.complete && h("span", { style: "color:var(--green);font-size:17px;flex:none" }, "✓")));
+    box.replaceChildren(users.length > 1 ? pills : "",
+      hist.length ? h("div", { class: "section" }, h("div", { class: "group" }, rows))
+        : emptyState("No history yet", who ? "Nothing watched by this person." : "Plays show up here once Tautulli records them."),
+      hist.length < total && h("div", { class: "section" }, h("div", { class: "group" },
+        h("button", { class: "cell tint center", onclick: e => { e.target.disabled = true; loadHistory(true); } }, `Show more (${total - hist.length} left)`))));
+  }
+
+  // --- top
+  let days = 30;
+  async function loadStats() {
+    box.replaceChildren(spinner());
+    try {
+      const r = await get(`/api/activity/stats?days=${days}`);
+      if (mode !== "stats") return;
+      const pills = h("div", { class: "pills" }, [[7, "7 days"], [30, "30 days"], [90, "90 days"], [365, "Year"]].map(([d, l]) =>
+        h("button", { class: d === days ? "on" : "", onclick: () => { days = d; loadStats(); } }, l)));
+      const titleList = (head, list) => list.length ? [h("div", { class: "section-head" }, head), h("div", { class: "section" }, h("div", { class: "group" },
+        list.map((x, i) => h("div", { class: "cell", style: "gap:10px;padding-top:7px;padding-bottom:7px" },
+          h("span", { class: "act-rank" }, i + 1), actPoster(x.poster, true),
+          h("div", { class: "main" }, h("div", { class: "t" }, x.title),
+            h("div", { class: "s" }, [`${x.plays || 0} play${x.plays === 1 ? "" : "s"}`, x.users ? `${x.users} ${x.users === 1 ? "person" : "people"}` : "",
+              x.duration ? fmtLen(x.duration) : ""].filter(Boolean).join(" · ")))))))] : [];
+      const simple = (head, list) => list.length ? [h("div", { class: "section-head" }, head), h("div", { class: "section" }, h("div", { class: "group" },
+        list.map((x, i) => h("div", { class: "cell" }, h("span", { class: "act-rank" }, i + 1),
+          h("div", { class: "main" }, h("div", { class: "t" }, x.name || "Unknown"),
+            h("div", { class: "s" }, [`${x.plays || 0} plays`, x.duration ? fmtLen(x.duration) : ""].filter(Boolean).join(" · ")))))))] : [];
+      const kids = [pills, ...titleList("Most watched movies", r.movies), ...titleList("Most watched shows", r.shows),
+        ...simple("Top people", r.users), ...simple("Top devices", r.platforms)];
+      box.replaceChildren(...(kids.length > 1 ? kids : [pills, emptyState("Nothing watched in this period")]));
+    } catch (e) { box.replaceChildren(errorState(e, loadStats)); }
+  }
+
+  function show() {
+    clearInterval(timer);
+    if (mode === "now") { loadNow(); timer = setInterval(() => { if (visible && !document.hidden && mode === "now") loadNow(true); }, 10000); }
+    else if (mode === "history") loadHistory();
+    else loadStats();
+  }
+  show();
+  return { el: p.el, title: "Plex activity",
+    show() { visible = true; if (mode === "now") loadNow(true); }, hide() { visible = false; }, destroy() { clearInterval(timer); } };
 }
 
 /** Every title in a Radarr/Sonarr instance, A–Z, with a filter field. */
@@ -1583,7 +1735,7 @@ function pickFolder(title, srcPath, okLabel) {
 const SECTION_STYLE = {
   general: ["#8e8e93", "gear"], radarr: ["#f5b100", "film"], sonarr: ["#2f8fe5", "tv"], seerr: ["#7c5cff", "compass"],
   nzbget: ["#34c759", "down"], qbittorrent: ["#2f6fdb", "down"], filestation: ["#1ea1f2", "drive"], plex: ["#e5a00d", "film"],
-  tmdb: ["#0dbd8b", "film"],
+  tmdb: ["#0dbd8b", "film"], tautulli: ["#e5a00d", "play"],
 };
 function sectionIcon(sec) {
   const [bg, ic] = SECTION_STYLE[sec] || ["#8e8e93", "gear"];

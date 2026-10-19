@@ -1159,6 +1159,10 @@ def test_detect_apps(tmp_path, monkeypatch):
     (plex / "Preferences.xml").write_text('<Preferences PlexOnlineToken="PT" />')
     (stack / "nzbget").mkdir()
     (stack / "nzbget" / "nzbget.conf").write_text("ControlPort=6789\nControlUsername=nzb\nControlPassword=pw\n")
+    (stack / "tautulli").mkdir()
+    (stack / "tautulli" / "config.ini").write_text("[General]\nhttp_port = 8181\nhttp_root = \"\"\napi_key = TK\n")
+    responses.get("http://192.168.4.68:8181/api/v2",
+                  json={"response": {"result": "success", "data": {"tautulli_version": "v2.15"}}})
     monkeypatch.setattr(gw, "STACK_DIR", str(stack))
     responses.get("http://192.168.4.68:7878/api/v3/system/status", json={"appName": "Radarr", "version": "5"})
     responses.get("http://192.168.4.68:7879/r4k/api/v3/system/status", status=401)
@@ -1177,6 +1181,8 @@ def test_detect_apps(tmp_path, monkeypatch):
     assert by[("seerr", "seerr")]["name"] == "Jellyseerr" and by[("seerr", "seerr")]["verified"]
     assert by[("plex", "plex")]["token"] == "PT" and "2 libraries" in by[("plex", "plex")]["message"]
     assert by[("nzbget", "nzbget")]["username"] == "nzb" and by[("nzbget", "nzbget")]["verified"]
+    t = by[("tautulli", "tautulli")]
+    assert t["url"] == "http://192.168.4.68:8181" and t["api_key"] == "TK" and "v2.15" in t["message"]
     monkeypatch.setattr(gw, "STACK_DIR", str(tmp_path / "missing"))
     assert gw.detect_apps("x") == {"mounted": False, "found": []}
 
@@ -1456,3 +1462,50 @@ def test_x_cookies(client, tmp_path, monkeypatch):
     assert client.get("/api/x/cookies", headers=H).get_json()["set"] is True
     assert client.delete("/api/x/cookies", headers=H).status_code == 200
     assert not (tmp_path / "x-cookies.txt").exists() and "cookies" not in json.loads(cfg_path.read_text())["twitter"]
+
+
+@responses.activate
+def test_tautulli_activity(client, monkeypatch):
+    monkeypatch.setitem(gw.CFG, "tautulli", {"url": "http://nas:8181", "api_key": "tk"})
+    assert client.get("/api/config", headers=H).get_json()["activity"] is True
+
+    def api(req):
+        from urllib.parse import parse_qs, urlsplit as us
+        q = {k: v[0] for k, v in parse_qs(us(req.url).query).items()}
+        assert q["apikey"] == "tk"
+        cmd = q["cmd"]
+        data = {
+            "get_activity": {"stream_count": "1", "total_bandwidth": 12000, "lan_bandwidth": 12000, "wan_bandwidth": 0,
+                             "sessions": [{"session_key": "7", "friendly_name": "Matt", "media_type": "episode",
+                                           "grandparent_title": "Nathan For You", "title": "Smokers Allowed",
+                                           "parent_media_index": "2", "media_index": "5", "grandparent_thumb": "/library/metadata/1/thumb/1",
+                                           "state": "playing", "progress_percent": "42", "view_offset": "600000", "duration": "1320000",
+                                           "player": "Lounge", "transcode_decision": "direct play",
+                                           "stream_video_full_resolution": "1080p", "quality_profile": "Original",
+                                           "bandwidth": "12000", "location": "lan"}]},
+            "get_history": {"recordsFiltered": 1, "data": [{"id": 9, "friendly_name": "Dad", "user_id": 2, "media_type": "movie",
+                                                           "title": "Dune", "year": 2024, "thumb": "/t", "started": 1700000000,
+                                                           "play_duration": 2400, "percent_complete": 30, "watched_status": 0,
+                                                           "transcode_decision": "transcode"}]},
+            "get_home_stats": [{"stat_id": "top_movies", "rows": [{"title": "Dune", "total_plays": 4, "users_watched": 2}]},
+                               {"stat_id": "top_users", "rows": [{"friendly_name": "Matt", "total_plays": 40}]}],
+            "get_users": [{"user_id": 1, "friendly_name": "Matt"}],
+        }[cmd]
+        return 200, {}, json.dumps({"response": {"result": "success", "data": data}})
+    responses.add_callback(responses.GET, "http://nas:8181/api/v2", callback=api)
+
+    a = client.get("/api/activity", headers=H).get_json()
+    s = a["streams"][0]
+    assert a["count"] == 1 and s["title"] == "Nathan For You" and s["subtitle"] == "S02E05 · Smokers Allowed"
+    assert s["decision"] == "Direct play" and s["quality"] == "1080p" and s["position"] == 600 and s["location"] == "LAN"
+    assert s["poster"].startswith("/api/activity/img?img=%2Flibrary%2Fmetadata%2F1")
+    hi = client.get("/api/activity/history?user=2", headers=H).get_json()
+    assert hi["total"] == 1 and hi["items"][0]["decision"] == "Transcode" and hi["items"][0]["subtitle"] == "2024"
+    st = client.get("/api/activity/stats?days=7", headers=H).get_json()
+    assert st["movies"][0]["plays"] == 4 and st["users"][0]["name"] == "Matt" and st["shows"] == []
+    assert client.get("/api/activity/users", headers=H).get_json()["users"] == [{"id": 1, "name": "Matt"}]
+
+
+def test_tautulli_off(client):
+    assert client.get("/api/config", headers=H).get_json()["activity"] is False
+    assert client.get("/api/activity", headers=H).status_code == 404

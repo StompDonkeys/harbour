@@ -3531,7 +3531,7 @@ def normalise_config(c):
                 c.pop(key, None)
         elif v is not None and not filled(v):
             c.pop(key, None)
-    for key in ("plex", "prowlarr", "filestation"):
+    for key in ("plex", "prowlarr", "filestation", "tautulli"):
         if key in c and not filled(c[key]):
             c.pop(key)
     if isinstance(c.get("tmdb"), dict) and not (c["tmdb"].get("api_key") or "").strip():
@@ -3715,6 +3715,18 @@ def detect_apps(host):
                                   "url": f"http://{host}:{conf('ControlPort') or 6789}",
                                   "username": conf("ControlUsername"), "password": conf("ControlPassword"),
                                   "source": rel})
+                elif fn == "config.ini" and "tautulli" in rel.lower():
+                    txt = open(path, encoding="utf-8", errors="ignore").read(200000)
+
+                    def ini(k):
+                        m = re.search(rf"^{k}\s*=\s*(.*)$", txt, re.M)
+                        return m.group(1).strip().strip('"') if m else ""
+                    key = ini("api_key")
+                    if key:
+                        root_ = ini("http_root").strip("/")
+                        found.append({"kind": "tautulli", "id": "tautulli", "name": "Tautulli",
+                                      "url": f"http://{host}:{ini('http_port') or 8181}" + (f"/{root_}" if root_ else ""),
+                                      "api_key": key, "source": rel})
                 elif fn == "qBittorrent.conf":
                     txt = open(path, encoding="utf-8", errors="ignore").read(100000)
                     m = re.search(r"^WebUI\\\\Port=(\d+)", txt, re.M)
@@ -3735,7 +3747,7 @@ def detect_apps(host):
         except Exception as e:
             r = {"ok": False, "message": str(e)}
         f["verified"], f["message"] = r["ok"], r["message"]
-    found.sort(key=lambda f: ("radarr sonarr seerr plex prowlarr nzbget qbittorrent".find(f["kind"]), f["name"]))
+    found.sort(key=lambda f: ("radarr sonarr seerr plex tautulli prowlarr nzbget qbittorrent".find(f["kind"]), f["name"]))
     return {"mounted": True, "found": found}
 
 
@@ -3766,6 +3778,9 @@ def test_service(kind, c):
             r.raise_for_status()
             n = len((r.json().get("MediaContainer") or {}).get("Directory") or [])
             return {"ok": True, "message": f"Connected · {n} libraries ✓"}
+        if kind == "tautulli":
+            d = Tautulli(c).api("get_tautulli_info", timeout=8) or {}
+            return {"ok": True, "message": f"Tautulli {d.get('tautulli_version', '')} ✓".replace("  ", " ")}
         if kind == "nzbget":
             v = NzbGet(c).rpc("version")
             return {"ok": True, "message": f"NZBGet {v} ✓"}
@@ -4198,6 +4213,7 @@ def config():
                    trailers=trailers_available(),
                    indexers=bool(CFG.get("prowlarr") or CFG.get("newznab")),
                    xdl=x_available(),
+                   activity=bool((CFG.get("tautulli") or {}).get("api_key")),
                    gatewayUpdate=gateway_update(),
                    repo=CFG.get("github_repo") or DEFAULT_REPO)
 
@@ -4360,6 +4376,158 @@ def img(kind, inst, p):
         return Response(status=404)
     return Response(r.content, mimetype=r.headers.get("Content-Type", "image/jpeg"),
                     headers={"Cache-Control": "public, max-age=86400"})
+
+
+# ---------------------------------------------------------------- Tautulli (Plex activity)
+#
+# Who's watching right now, the watch history and the top titles/users, from Tautulli's API v2.
+
+class Tautulli:
+    def __init__(self, conf):
+        self.url = conf["url"].rstrip("/")
+        self.key = conf.get("api_key", "")
+
+    def api(self, cmd, timeout=15, **params):
+        r = requests.get(f"{self.url}/api/v2", params={"apikey": self.key, "cmd": cmd, **params}, timeout=timeout)
+        if r.status_code in (401, 403):
+            raise ApiError("Tautulli rejected the API key", 502)
+        r.raise_for_status()
+        resp = (r.json() or {}).get("response") or {}
+        if resp.get("result") != "success":
+            raise ApiError(f"Tautulli: {resp.get('message') or 'request failed'}", 502)
+        return resp.get("data")
+
+    @staticmethod
+    def img(path, w=300, h=450):
+        return f"/api/activity/img?{urlencode({'img': path, 'w': w, 'h': h})}" if path else None
+
+    @staticmethod
+    def _titles(x):
+        mt = x.get("media_type")
+        if mt == "episode":
+            s, e = x.get("parent_media_index"), x.get("media_index")
+            ep = f"S{int(s):02d}E{int(e):02d}" if str(s).isdigit() and str(e).isdigit() else ""
+            return x.get("grandparent_title") or x.get("full_title"), join(ep, x.get("title"))
+        if mt == "track":
+            return x.get("title"), join(x.get("grandparent_title"), x.get("parent_title"))
+        return x.get("title") or x.get("full_title"), str(x.get("year") or "") or None
+
+    @staticmethod
+    def _decision(x):
+        d = (x.get("transcode_decision") or "").lower()
+        return {"direct play": "Direct play", "copy": "Direct stream", "transcode": "Transcode"}.get(d, d.title() or None)
+
+    def activity(self):
+        d = self.api("get_activity", timeout=10) or {}
+        streams = []
+        for x in d.get("sessions") or []:
+            title, sub = self._titles(x)
+            poster = x.get("grandparent_thumb") if x.get("media_type") == "episode" else x.get("thumb")
+            res = x.get("stream_video_full_resolution") or x.get("video_full_resolution")
+            streams.append(clean({
+                "id": str(x.get("session_key") or x.get("session_id") or len(streams)),
+                "user": x.get("friendly_name") or x.get("user"),
+                "title": title, "subtitle": sub, "kind": x.get("media_type"),
+                "poster": self.img(poster), "art": self.img(x.get("art"), 1280, 720),
+                "state": x.get("state"), "progress": int(x.get("progress_percent") or 0),
+                "position": int(x.get("view_offset") or 0) // 1000, "duration": int(x.get("duration") or 0) // 1000,
+                "player": x.get("player") or x.get("device"), "platform": x.get("platform"), "product": x.get("product"),
+                "quality": join(res, x.get("quality_profile") if x.get("quality_profile") != "Original" else None),
+                "decision": self._decision(x),
+                "bandwidth": int(x.get("bandwidth") or 0),
+                "location": (x.get("location") or "").upper() or None,
+            }))
+        return {"streams": streams, "count": int(d.get("stream_count") or len(streams)),
+                "bandwidth": int(d.get("total_bandwidth") or 0), "lan": int(d.get("lan_bandwidth") or 0),
+                "wan": int(d.get("wan_bandwidth") or 0)}
+
+    def history(self, start=0, length=50, user_id=None, media_type=None):
+        params = {"start": start, "length": length, "order_column": "date", "order_dir": "desc"}
+        if user_id:
+            params["user_id"] = user_id
+        if media_type in ("movie", "episode", "track"):
+            params["media_type"] = media_type
+        d = self.api("get_history", **params) or {}
+        items = []
+        for x in d.get("data") or []:
+            title, sub = self._titles(x)
+            poster = x.get("grandparent_thumb") if x.get("media_type") == "episode" else x.get("thumb")
+            items.append(clean({
+                "id": str(x.get("id") or x.get("reference_id") or len(items)),
+                "user": x.get("friendly_name") or x.get("user"), "userId": x.get("user_id"),
+                "title": title, "subtitle": sub, "kind": x.get("media_type"),
+                "poster": self.img(poster or x.get("thumb")),
+                "started": x.get("started") or x.get("date"), "stopped": x.get("stopped"),
+                "watched": int(x.get("play_duration") or x.get("duration") or 0),
+                "percent": int(x.get("percent_complete") or 0),
+                "complete": (x.get("watched_status") or 0) >= 1,
+                "player": x.get("player"), "platform": x.get("platform"),
+                "decision": self._decision(x), "location": (x.get("location") or "").upper() or None,
+            }))
+        return {"items": items, "total": int(d.get("recordsFiltered") or d.get("recordsTotal") or len(items)),
+                "duration": d.get("filter_duration") or d.get("total_duration")}
+
+    def stats(self, days=30):
+        rows = self.api("get_home_stats", time_range=days, stats_count=6,
+                        stat_type="plays") or []
+        by = {r.get("stat_id"): r.get("rows") or [] for r in rows if isinstance(r, dict)}
+
+        def titles(key):
+            return [clean({"title": x.get("title"), "plays": x.get("total_plays"),
+                           "duration": x.get("total_duration"), "users": x.get("users_watched"),
+                           "poster": self.img(x.get("grandparent_thumb") or x.get("thumb"))}) for x in by.get(key, [])]
+        users = [clean({"name": x.get("friendly_name") or x.get("user"), "id": x.get("user_id"),
+                        "plays": x.get("total_plays"), "duration": x.get("total_duration")})
+                 for x in by.get("top_users", [])]
+        platforms = [clean({"name": x.get("platform"), "plays": x.get("total_plays"),
+                            "duration": x.get("total_duration")}) for x in by.get("top_platforms", [])]
+        return {"days": days, "movies": titles("top_movies"), "shows": titles("top_tv"),
+                "users": users, "platforms": platforms}
+
+    def users(self):
+        return [{"id": u.get("user_id"), "name": u.get("friendly_name") or u.get("username")}
+                for u in (self.api("get_users") or []) if u.get("is_active", 1)]
+
+
+def tautulli():
+    t = CFG.get("tautulli") or {}
+    if not t.get("url") or not t.get("api_key"):
+        raise ApiError("Tautulli isn't set up — add it on the setup page", 404)
+    return Tautulli(t)
+
+
+@app.get("/api/activity")
+def activity_now():
+    return jsonify(tautulli().activity())
+
+
+@app.get("/api/activity/history")
+def activity_history():
+    a = request.args
+    return jsonify(tautulli().history(int(a.get("start") or 0), min(int(a.get("length") or 50), 200),
+                                      a.get("user") or None, a.get("type") or None))
+
+
+@app.get("/api/activity/stats")
+def activity_stats():
+    return jsonify(tautulli().stats(max(1, min(int(request.args.get("days") or 30), 3650))))
+
+
+@app.get("/api/activity/users")
+def activity_users():
+    return jsonify(users=tautulli().users())
+
+
+@app.get("/api/activity/img")
+def activity_img():
+    t = tautulli()
+    a = request.args
+    r = requests.get(f"{t.url}/api/v2", params={"apikey": t.key, "cmd": "pms_image_proxy", "img": a.get("img", ""),
+                                                "width": a.get("w", 300), "height": a.get("h", 450),
+                                                "fallback": "poster"}, timeout=20)
+    if r.status_code >= 400 or not r.headers.get("Content-Type", "").startswith("image"):
+        return Response(status=404)
+    return Response(r.content, mimetype=r.headers["Content-Type"], headers={"Cache-Control": "public, max-age=86400"})
 
 
 def files():

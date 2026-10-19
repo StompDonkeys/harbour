@@ -96,11 +96,16 @@ SCHEMA = {
         {"key": "url", "label": "Address", "type": "url", "required": True, "placeholder": "http://192.168.4.68:32400"},
         {"key": "token", "label": "Plex token", "type": "secret", "required": True},
     ]},
+    "tautulli": {"title": "Tautulli", "single": True, "test": True, "optional": True, "fields": [
+        {"key": "url", "label": "Address", "type": "url", "required": True, "placeholder": "http://192.168.4.68:8181"},
+        {"key": "api_key", "label": "API key", "type": "secret", "required": True,
+         "help": "Tautulli → Settings → Web Interface → API key"},
+    ]},
     "tmdb": {"title": "TMDB", "single": True, "optional": True, "fields": [
         {"key": "api_key", "label": "Read access token", "type": "secret", "help": "Optional — extra artwork and info"},
     ]},
 }
-ORDER = ["general", "radarr", "sonarr", "seerr", "nzbget", "qbittorrent", "newznab", "filestation", "plex", "prowlarr", "tmdb"]
+ORDER = ["general", "radarr", "sonarr", "seerr", "nzbget", "qbittorrent", "newznab", "filestation", "plex", "tautulli", "prowlarr", "tmdb"]
 SECRET_KEYS = {s: {f["key"] for f in v["fields"] if f["type"] == "secret"} for s, v in SCHEMA.items()}
 
 

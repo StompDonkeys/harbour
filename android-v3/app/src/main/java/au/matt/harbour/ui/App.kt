@@ -101,6 +101,7 @@ sealed interface Screen {
     data class Trailer(val key: String, val title: String) : Screen
     data object Indexers : Screen
     data object Search : Screen
+    data object Activity : Screen
     data object Downloads : Screen
     data object Files : Screen
     data object Settings : Screen
@@ -267,6 +268,7 @@ private fun MainShell(config: GatewayConfig, settings: @Composable () -> Unit, u
                 config.services.forEach { add(NavItem(it.name, Screen.Library(it), iconFor(it))) }
             }
             if (config.calendar) add(NavItem("Calendar", Screen.Calendar, HIcons.Calendar))
+            if (config.activity) add(NavItem("Activity", Screen.Activity, HIcons.Activity))
             // With the hub, indexer search lives inside Search (Movies & TV | Indexers).
             if (config.indexers && !v2) add(NavItem("Indexers", Screen.Indexers, HIcons.ManageSearch))
             if (config.downloads) add(NavItem("Downloads", Screen.Downloads, HIcons.Download))
@@ -458,6 +460,7 @@ private fun ScreenContent(
             onOpen = { id -> open(null, id) },
         )
         Screen.Downloads -> TopInset { DownloadsScreen() }
+        Screen.Activity -> TopInset { ActivityScreen() }
         Screen.Files -> TopInset { FilesScreen(onPlay = { path -> play("file:$path") }) }
         Screen.Settings -> TopInset { settings() }
     }

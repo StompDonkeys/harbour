@@ -1,6 +1,6 @@
 # Harbour V3
 
-A Fire TV app for your Synology *arr stack — Radarr, Sonarr, Jellyseerr, Plex, Prowlarr, NZBGet, qBittorrent and File Station — designed for the remote, not a mouse.
+A Fire TV app for your Synology *arr stack — Radarr, Sonarr, Jellyseerr, Plex, Tautulli, Prowlarr, NZBGet, qBittorrent and File Station — designed for the remote, not a mouse.
 
 ```
  Fire TV / phone                      Synology NAS
@@ -57,6 +57,7 @@ Make sure your Docker user has **Read/Write** on that folder (File Station → f
 | **Discover** | Trending, popular, upcoming. |
 | **Movies / TV** | Your Radarr and Sonarr libraries merged. One page per title: ratings, trailers (played in Harbour), cast, where it streams, what you own in HD/4K, play in Plex, auto/manual search, monitor, delete, request. Seasons → episodes with per-episode actions. |
 | **Calendar** | Month view of releases; click an episode to manage it. |
+| **Activity** | Plex activity from Tautulli: who's watching now (direct play or transcode, quality, bandwidth), watch history per person, and the most watched titles, people and devices. Also on the phone: Home → *Plex activity*. |
 | **Downloads** | NZBGet + qBittorrent queues: pause, resume, delete. |
 | **Files** | Browse, move, copy, rename and delete on the NAS. Press OK on a video or audio file to play it on the TV. |
 | **Settings** | Pairing, Plex profile, updates, demo screen recording (saved to the NAS). |

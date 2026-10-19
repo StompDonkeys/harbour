@@ -47,6 +47,8 @@ data class GatewayConfig(
     val dashboard: Boolean = false,
     val trailers: Boolean = false,
     val indexers: Boolean = false,
+    /** Tautulli is set up: Plex activity (now playing, history, top). */
+    val activity: Boolean = false,
     /** A newer gateway image is published (version), if any. */
     val gatewayUpdate: String? = null,
     val repo: String = "StompDonkeys/harbour",
@@ -640,3 +642,91 @@ data class PairStatus(val status: String, val token: String? = null)
 suspend fun Gateway.pairStart(name: String): PairStart = post("/api/pair/start", buildJsonObject { put("name", name) })
 
 suspend fun Gateway.pairStatus(id: String): PairStatus = get("/api/pair/status?id=${Gateway.enc(id)}")
+
+
+// ---------------------------------------------------------------- Plex activity (Tautulli)
+
+@Serializable
+data class ActStream(
+    val id: String = "",
+    val user: String? = null,
+    val title: String? = null,
+    val subtitle: String? = null,
+    val kind: String? = null,
+    val poster: String? = null,
+    val art: String? = null,
+    val state: String? = null,
+    val progress: Int = 0,
+    val position: Long = 0,
+    val duration: Long = 0,
+    val player: String? = null,
+    val platform: String? = null,
+    val quality: String? = null,
+    val decision: String? = null,
+    val bandwidth: Long = 0,
+    val location: String? = null,
+)
+
+@Serializable
+data class Activity(
+    val streams: List<ActStream> = emptyList(),
+    val count: Int = 0,
+    val bandwidth: Long = 0,
+    val lan: Long = 0,
+    val wan: Long = 0,
+)
+
+@Serializable
+data class ActHistoryItem(
+    val id: String = "",
+    val user: String? = null,
+    val title: String? = null,
+    val subtitle: String? = null,
+    val kind: String? = null,
+    val poster: String? = null,
+    val started: Long? = null,
+    val watched: Long = 0,
+    val percent: Int = 0,
+    val complete: Boolean = false,
+    val player: String? = null,
+    val platform: String? = null,
+    val decision: String? = null,
+    val location: String? = null,
+)
+
+@Serializable
+data class ActHistory(val items: List<ActHistoryItem> = emptyList(), val total: Int = 0)
+
+@Serializable
+data class ActTop(
+    val title: String? = null,
+    val name: String? = null,
+    val plays: Int = 0,
+    val duration: Long = 0,
+    val users: Int = 0,
+    val poster: String? = null,
+)
+
+@Serializable
+data class ActStats(
+    val days: Int = 30,
+    val movies: List<ActTop> = emptyList(),
+    val shows: List<ActTop> = emptyList(),
+    val users: List<ActTop> = emptyList(),
+    val platforms: List<ActTop> = emptyList(),
+)
+
+@Serializable
+data class ActUser(val id: Long = 0, val name: String? = null)
+
+@Serializable
+data class ActUsers(val users: List<ActUser> = emptyList())
+
+suspend fun Gateway.activity(): Activity = get("/api/activity")
+
+suspend fun Gateway.activityHistory(start: Int, user: Long?): ActHistory =
+    get("/api/activity/history?start=$start&length=40" + (user?.let { "&user=$it" } ?: ""))
+
+suspend fun Gateway.activityStats(days: Int): ActStats = get("/api/activity/stats?days=$days")
+
+suspend fun Gateway.activityUsers(): ActUsers = get("/api/activity/users")

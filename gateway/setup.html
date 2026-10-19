@@ -149,6 +149,8 @@ const SECTIONS = [
    fields: [["name", "Name", "Jellyseerr"], ["url", "Address", "http://192.168.1.10:5055"], ["api_key", "API key", "Settings → General", true]]},
   {key: "plex", title: "Plex", test: "plex", hint: "For playing in Harbour and watched ticks.",
    fields: [["url", "Address", "http://192.168.1.10:32400"], ["token", "Plex token", "", true]]},
+  {key: "tautulli", title: "Tautulli", test: "tautulli", hint: "Plex activity: who's watching now, watch history and top titles.",
+   fields: [["url", "Address", "http://192.168.1.10:8181"], ["api_key", "API key", "Settings → Web Interface → API", true]]},
   {key: "prowlarr", title: "Prowlarr", test: "prowlarr", hint: "For the Indexers search page.",
    fields: [["url", "Address", "http://192.168.1.10:9696"], ["api_key", "API key", "Settings → General", true]]},
   {key: "newznab", title: "Usenet indexers not in Prowlarr", list: true, test: "newznab", optional: true,
