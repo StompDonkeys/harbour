@@ -15,6 +15,11 @@
     "id": "seerr", "name": "Jellyseerr", "url": "http://192.168.4.68:5055", "api_key": "SEERR_API_KEY"
   },
 
+  "prowlarr": { "url": "http://192.168.4.68:9696", "api_key": "PROWLARR_API_KEY" },
+  "newznab": [
+    { "name": "NZBgeek", "url": "https://api.nzbgeek.info", "api_key": "OPTIONAL_INDEXER_API_KEY" }
+  ],
+
   "region": "AU",
   "tmdb": { "api_key": "OPTIONAL_TMDB_READ_ACCESS_TOKEN" },
 

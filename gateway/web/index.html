@@ -11,8 +11,9 @@
 <meta name="theme-color" content="#000000" media="(prefers-color-scheme: dark)">
 <meta name="format-detection" content="telephone=no">
 <link rel="manifest" href="/m/manifest.webmanifest">
-<link rel="apple-touch-icon" href="/m/icon-180.png">
-<link rel="icon" href="/m/icon-180.png">
+<link rel="apple-touch-icon" href="/m/apple-touch-icon.png">
+<link rel="icon" href="/m/favicon-32.png" sizes="32x32">
+<link rel="apple-touch-startup-image" href="/m/launch-1179.png" media="(device-width: 393px) and (-webkit-device-pixel-ratio: 3)">
 <title>Harbour</title>
 <style>
 :root {
@@ -1440,7 +1441,10 @@ function SettingsScreen() {
           h("div", { class: "s" }, values[sec] ? (values[sec].url || (values[sec]._set?.length ? "Set" : "")) || "Set" : "Not set up")), svg("chev"))))));
     kids.push(h("div", { class: "section-head" }, "Harbour"), h("div", { class: "section" }, h("div", { class: "group" },
       h("button", { class: "cell", style: "--inset:57px", onclick: () => push(EditScreen("general", 0)) }, sectionIcon("general"),
-        h("div", { class: "main" }, h("div", { class: "t" }, "General"), h("div", { class: "s" }, "Name, region, TV access token")), svg("chev")),
+        h("div", { class: "main" }, h("div", { class: "t" }, "General"), h("div", { class: "s" }, "Name, region, gateway PIN")), svg("chev")),
+      h("a", { class: "cell", style: "--inset:57px;text-decoration:none;color:inherit", href: "/setup", target: "_blank" },
+        h("span", { class: "icon", style: "background:#2fb6a0" }, svg("gear")),
+        h("div", { class: "main" }, h("div", { class: "t" }, "Setup page"), h("div", { class: "s" }, "Pair TVs, find my apps · home network only")), svg("chev")),
       h("button", { class: "cell", style: "--inset:57px", onclick: () => push(PasswordScreen()) },
         h("span", { class: "icon", style: "background:#636366" }, svg("key")), h("div", { class: "main" }, "Change password"), svg("chev"))),
       h("div", { class: "section-foot" }, `Harbour gateway ${S.config?.version || ""}`)));
@@ -1497,7 +1501,7 @@ function EditScreen(sec, index) {
   if (!isNew && (sch.multi || sch.optional)) kids.push(h("div", { class: "section" }, h("div", { class: "group" },
     h("button", { class: "cell center danger", onclick: remove }, sch.multi ? `Remove ${entry.name || sch.title}` : `Turn off ${sch.title}`))));
   if (sec === "general") kids.push(h("div", { class: "section-foot", style: "margin:-20px 16px 0" },
-    "The TV access token is what your Fire TV apps send on your home network. Changing it means updating it on the TV too."));
+    "The gateway PIN logs you in to the setup page. Paired TVs use their own keys, so they keep working if you change it."));
   p.body.append(...kids);
 
   function collect() {
@@ -1605,20 +1609,20 @@ function showLogin(status) {
   const setup = status ? status.setup_needed : false;
   const name = status?.name || "Harbour";
   const err = h("div", { class: "err" });
-  const token = h("input", { type: "password", autocomplete: "off", autocapitalize: "off", autocorrect: "off", spellcheck: "false", placeholder: "Code from your TV app" });
+  const token = h("input", { type: "password", autocomplete: "off", autocapitalize: "off", autocorrect: "off", spellcheck: "false", placeholder: "The PIN from the setup page" });
   const pw = h("input", { type: "password", autocomplete: setup ? "new-password" : "current-password", placeholder: setup ? "At least 8 characters" : "Password" });
   const pw2 = h("input", { type: "password", autocomplete: "new-password", placeholder: "Repeat it" });
   const btn = h("button", { class: "btn primary", onclick: () => go() }, setup ? "Set password" : "Sign in");
   const form = h("form", { onsubmit: e => { e.preventDefault(); go(); } },
     h("div", { class: "section" }, h("div", { class: "group" },
-      setup && h("label", { class: "field" }, h("div", { class: "lbl" }, "TV access token"), token),
+      setup && h("label", { class: "field" }, h("div", { class: "lbl" }, "Gateway PIN"), token),
       h("label", { class: "field" }, h("div", { class: "lbl" }, setup ? "New password" : "Password"), pw),
       setup && h("label", { class: "field" }, h("div", { class: "lbl" }, "Confirm password"), pw2))),
     err, btn, h("input", { type: "submit", class: "hidden" }));
   box.replaceChildren(
-    h("div", { class: "logo" }, h("img", { src: "/m/icon-180.png", alt: "" })),
+    h("div", { class: "logo" }, h("img", { src: "/m/apple-touch-icon.png", alt: "" })),
     h("h1", {}, setup ? "Set up Harbour" : name),
-    h("p", {}, setup ? "Prove it's you with the access token your Fire TV app uses, then choose a password for this phone and any others."
+    h("p", {}, setup ? "Enter the gateway PIN you chose on the setup page, then pick a password for this phone and any others."
       : "Sign in to manage your NAS."),
     form);
   setTimeout(() => (setup ? token : pw).focus(), 300);

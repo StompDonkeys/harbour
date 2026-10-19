@@ -6,9 +6,10 @@ Kept in its own file so app.py's TV endpoints stay as they were. app.py imports
 
 Access rules
   * Requests on the home network (Host is an IP / localhost / *.local) keep working with the
-    6-digit access token, exactly as before — that's what the Fire TV apps use.
+    gateway PIN or a paired device key, exactly as before — that's what the TV apps use.
   * Requests through the DSM reverse proxy (a domain-name Host, or forwarding headers) need a
-    web-app login. The token isn't accepted there unless config has "remote_token": true.
+    web-app login. PINs and device keys aren't accepted there unless config has "remote_token": true,
+    and the setup page and pairing are home-network only.
   * The web app signs in with a password (stored hashed in config.json under "web") and gets a
     signed, HttpOnly cookie. Unsafe requests made with that cookie must also carry the header
     X-Harbour-Web: 1, which other sites can't add (a cheap CSRF guard on top of SameSite).
@@ -23,8 +24,7 @@ import secrets
 import threading
 import time
 
-import requests
-from flask import Response, jsonify, redirect, request, send_from_directory
+from flask import jsonify, redirect, request, send_from_directory
 from itsdangerous import BadSignature, URLSafeTimedSerializer
 from werkzeug.security import check_password_hash, generate_password_hash
 
@@ -39,8 +39,8 @@ SCHEMA = {
         {"key": "name", "label": "Name", "type": "text", "placeholder": "Harbour"},
         {"key": "region", "label": "Region", "type": "text", "placeholder": "AU",
          "help": "Two-letter country code for release dates and streaming info"},
-        {"key": "token", "label": "TV access token", "type": "secret",
-         "help": "The code the Fire TV apps use on your home network"},
+        {"key": "token", "label": "Gateway PIN", "type": "secret",
+         "help": "Logs in to the setup page; paired TVs keep working if you change it"},
     ]},
     "radarr": {"title": "Radarr", "multi": True, "test": True, "fields": [
         {"key": "name", "label": "Name", "type": "text", "placeholder": "Radarr"},
@@ -60,6 +60,16 @@ SCHEMA = {
         {"key": "url", "label": "Address", "type": "url", "required": True, "placeholder": "http://192.168.4.68:5055"},
         {"key": "api_key", "label": "API key", "type": "secret", "required": True,
          "help": "Jellyseerr → Settings → General → API Key"},
+    ]},
+    "prowlarr": {"title": "Prowlarr", "single": True, "test": True, "optional": True, "fields": [
+        {"key": "url", "label": "Address", "type": "url", "required": True, "placeholder": "http://192.168.4.68:9696"},
+        {"key": "api_key", "label": "API key", "type": "secret", "required": True,
+         "help": "Prowlarr → Settings → General → API Key"},
+    ]},
+    "newznab": {"title": "Newznab indexer", "multi": True, "test": True, "fields": [
+        {"key": "name", "label": "Name", "type": "text", "placeholder": "NZBgeek"},
+        {"key": "url", "label": "Address", "type": "url", "required": True, "placeholder": "https://api.nzbgeek.info"},
+        {"key": "api_key", "label": "API key", "type": "secret"},
     ]},
     "nzbget": {"title": "NZBGet", "multi": True, "test": True, "fields": [
         {"key": "name", "label": "Name", "type": "text", "placeholder": "NZBGet"},
@@ -90,11 +100,11 @@ SCHEMA = {
         {"key": "api_key", "label": "Read access token", "type": "secret", "help": "Optional — extra artwork and info"},
     ]},
 }
-ORDER = ["general", "radarr", "sonarr", "seerr", "nzbget", "qbittorrent", "filestation", "plex", "tmdb"]
+ORDER = ["general", "radarr", "sonarr", "seerr", "nzbget", "qbittorrent", "newznab", "filestation", "plex", "prowlarr", "tmdb"]
 SECRET_KEYS = {s: {f["key"] for f in v["fields"] if f["type"] == "secret"} for s, v in SCHEMA.items()}
 
 
-def install(app, *, get_cfg, config_path, reload, ApiError, NzbGet, QBittorrent, FileStation):
+def install(app, *, get_cfg, config_path, valid_token, save_config, test_service, ApiError, FileStation):
     """Wire the web-app routes and the access check into the gateway's Flask app."""
     fails = {}          # ip -> [failure times]
     fails_lock = threading.Lock()
@@ -169,68 +179,63 @@ def install(app, *, get_cfg, config_path, reload, ApiError, NzbGet, QBittorrent,
         with fails_lock:
             fails.pop(client_ip(), None)
 
-    def write_config(new):
-        """Write config.json atomically; explain the read-only mount if that's what stops us."""
-        text = json.dumps(new, indent=2, ensure_ascii=False) + "\n"
-        tmp = config_path + ".tmp"
-        try:
-            with open(tmp, "w", encoding="utf-8") as f:
-                f.write(text)
-            os.replace(tmp, config_path)
-        except OSError:
-            try:  # folder not writable but the file is: write in place
-                with open(config_path, "w", encoding="utf-8") as f:
-                    f.write(text)
-            except OSError as e:
-                raise ApiError("Harbour can't save settings — its config folder is read-only. In the gateway's "
-                               "docker-compose.yml change './config:/config:ro' to './config:/config', then "
-                               f"rebuild the project. ({e.strerror})", 409)
-
     def current_file():
+        if not os.path.exists(config_path):
+            return {}
         with open(config_path, encoding="utf-8") as f:
             return json.load(f)
 
     def save(mutate):
-        """Load the file, apply `mutate`, save, reload the gateway; roll back if the reload fails."""
+        """Load the file, apply `mutate`, save + reload through the gateway; roll back if the reload fails."""
         with save_lock:
             old = current_file()
             new = json.loads(json.dumps(old))
             mutate(new)
-            write_config(new)
             try:
-                reload()
+                save_config(new)
+            except ApiError:
+                raise                           # couldn't write — nothing changed
             except Exception as e:
-                write_config(old)
-                reload()
+                save_config(old)
                 raise ApiError(f"Those settings didn't load ({type(e).__name__}: {e}) — nothing was changed")
             return new
 
     # ------------------------------------------------------------ access check
 
-    PUBLIC = {"/", "/apk", "/harbour.apk", "/harbourv2.apk", "/api/login", "/api/login/status",
-              "/api/login/setup", "/favicon.ico", "/apple-touch-icon.png", "/apple-touch-icon-precomposed.png"}
+    WEB_PUBLIC = {"/api/login", "/api/login/status", "/api/login/setup",
+                  "/apple-touch-icon.png", "/apple-touch-icon-precomposed.png", "/favicon.ico"}
+    REMOTE_OK = {"/", "/favicon.ico"}   # of the gateway's other public paths, what's fine from outside
+
+    def is_web_public(p):
+        return p in WEB_PUBLIC or p == "/m" or p.startswith("/m/")
+
+    def remote_guard(p):
+        """From outside, the setup page, pairing and APK downloads need a web-app sign-in."""
+        if not is_remote() or p in REMOTE_OK or session_ok():
+            return None
+        return jsonify(error="That's only available on your home network", login=True), 403
 
     def check_access():
         p = request.path.lower()
-        if p in PUBLIC or p == "/m" or p.startswith("/m/"):
+        if is_web_public(p):
             return None
         if session_ok():
             if request.method not in ("GET", "HEAD", "OPTIONS") and request.headers.get("X-Harbour-Web") != "1":
                 return jsonify(error="Missing X-Harbour-Web header"), 403
             return None
         cfg = get_cfg()
-        token = cfg.get("token") or ""
         given = request.headers.get("X-Token") or request.args.get("t") or ""
         if is_remote() and not cfg.get("remote_token"):
             return jsonify(error="Sign in to Harbour", login=True), 401
-        if is_remote() and not token:
-            return jsonify(error="Sign in to Harbour", login=True), 401
-        if token and not hmac.compare_digest(token, given):
+        if not cfg.get("token"):
+            return jsonify(error="The gateway isn't set up yet — open http://<your NAS>:8765/setup"), 503
+        if not valid_token(given):
             if is_remote():
                 if locked_out():
                     return jsonify(error="Too many attempts — try again in 15 minutes"), 429
                 note_fail()
-            return jsonify(error="Wrong access token — check Harbour's settings", login=bool(web().get("password"))), 401
+            return jsonify(error="Wrong access token — pair this device again from Harbour's settings",
+                           login=bool(web().get("password"))), 401
         return None
 
     # ------------------------------------------------------------ login routes
@@ -251,10 +256,10 @@ def install(app, *, get_cfg, config_path, reload, ApiError, NzbGet, QBittorrent,
         token = get_cfg().get("token") or ""
         pw = b.get("password") or ""
         if not token:
-            raise ApiError("Set an access token (\"token\") in config.json first, then try again", 409)
-        if not hmac.compare_digest(token, str(b.get("token") or "")):
+            raise ApiError("Set up the gateway first: open http://<your NAS>:8765/setup on your home network", 409)
+        if not hmac.compare_digest(token, str(b.get("token") or "").strip()):
             note_fail()
-            raise ApiError("That access token isn't right — it's the code your Fire TV app uses", 401)
+            raise ApiError("That isn't the gateway PIN — it's the PIN you chose on the setup page", 401)
         if len(pw) < 8:
             raise ApiError("Use at least 8 characters for the password")
 
@@ -461,47 +466,6 @@ def install(app, *, get_cfg, config_path, reload, ApiError, NzbGet, QBittorrent,
             base = c.get(section) if isinstance(c.get(section), dict) else None
         return apply_entry(section, base, edit)
 
-    def run_test(section, e):
-        t = 10
-        if section in ("radarr", "sonarr"):
-            r = requests.get(f"{e['url']}/api/v3/system/status", headers={"X-Api-Key": e["api_key"]}, timeout=t)
-            if r.status_code == 401:
-                return False, "API key rejected"
-            if r.status_code >= 400:
-                return False, f"HTTP {r.status_code} — is that the right address?"
-            j = r.json()
-            app_name = j.get("appName") or j.get("instanceName") or SCHEMA[section]["title"]
-            if section == "radarr" and app_name.lower().startswith("sonarr") or \
-                    section == "sonarr" and app_name.lower().startswith("radarr"):
-                return False, f"That address is {app_name}, not {SCHEMA[section]['title']}"
-            return True, f"Connected to {j.get('instanceName') or app_name} {j.get('version', '')}".strip()
-        if section == "seerr":
-            r = requests.get(f"{e['url']}/api/v1/settings/main", headers={"X-Api-Key": e["api_key"]}, timeout=t)
-            if r.status_code in (401, 403):
-                return False, "API key rejected"
-            if r.status_code >= 400:
-                return False, f"HTTP {r.status_code} — is that the right address?"
-            v = requests.get(f"{e['url']}/api/v1/status", timeout=t).json().get("version", "")
-            return True, f"Connected to {r.json().get('applicationTitle') or 'Jellyseerr'} {v}".strip()
-        if section == "nzbget":
-            return True, f"Connected to NZBGet {NzbGet(e).rpc('version')}"
-        if section == "qbittorrent":
-            q = QBittorrent(e)
-            return True, f"Connected to qBittorrent {q.req('GET', '/app/version').text.strip()}"
-        if section == "filestation":
-            fs = FileStation(e)
-            fs.login()
-            return True, f"Signed in to DSM as {e['username']}"
-        if section == "plex":
-            r = requests.get(f"{e['url']}/", headers={"X-Plex-Token": e["token"], "Accept": "application/json"}, timeout=t)
-            if r.status_code == 401:
-                return False, "Plex token rejected"
-            if r.status_code >= 400:
-                return False, f"HTTP {r.status_code}"
-            mc = r.json().get("MediaContainer") or {}
-            return True, f"Connected to {mc.get('friendlyName', 'Plex')} {mc.get('version', '').split('-')[0]}".strip()
-        return False, "Nothing to test"
-
     @app.post("/api/settings/test")
     def settings_test():
         b = request.get_json(silent=True) or {}
@@ -509,17 +473,10 @@ def install(app, *, get_cfg, config_path, reload, ApiError, NzbGet, QBittorrent,
         if section not in SCHEMA or not SCHEMA[section].get("test"):
             raise ApiError("Unknown service")
         try:
-            ok, msg = run_test(section, test_conf(section, b.get("entry") or {}))
+            r = test_service(section, test_conf(section, b.get("entry") or {}))
+            ok, msg = bool(r.get("ok")), r.get("message") or ""
         except ApiError as e:
             ok, msg = False, e.message
-        except requests.exceptions.SSLError:
-            ok, msg = False, "HTTPS certificate problem — try the http:// address"
-        except requests.exceptions.Timeout:
-            ok, msg = False, "No answer (timed out) — check the address and port"
-        except requests.exceptions.ConnectionError:
-            ok, msg = False, "Can't connect — check the address and port"
-        except (ValueError, KeyError) as e:
-            ok, msg = False, f"Unexpected reply ({type(e).__name__}) — is that the right address?"
         return jsonify(ok=ok, message=msg)
 
     # ------------------------------------------------------------ the web app itself
@@ -546,21 +503,14 @@ def install(app, *, get_cfg, config_path, reload, ApiError, NzbGet, QBittorrent,
 
     @app.get("/apple-touch-icon.png")
     @app.get("/apple-touch-icon-precomposed.png")
-    @app.get("/favicon.ico")
     def touch_icon():
-        return send_from_directory(WEB_DIR, "icon-180.png")
+        return send_from_directory(WEB_DIR, "apple-touch-icon.png")
 
-    return {"check_access": check_access, "is_remote": is_remote}
+    @app.get("/favicon.ico")
+    def favicon():
+        return send_from_directory(WEB_DIR, "favicon.ico")
 
-
-def wants_html():
-    a = request.headers.get("Accept", "")
-    return "text/html" in a and "application/json" not in a
-
-
-def browser_home():
-    """`/` in a browser opens the iPhone app; everything else still gets the JSON hello."""
-    return redirect("/m/", 302) if wants_html() else None
+    return {"check_access": check_access, "remote_guard": remote_guard, "is_remote": is_remote}
 
 
-__all__ = ["install", "browser_home", "SCHEMA", "Response"]
+__all__ = ["install", "SCHEMA"]

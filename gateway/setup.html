@@ -1,0 +1,374 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Harbour Setup</title>
+<style>
+  :root {
+    --bg: #07080a; --panel: #121419; --panel2: #191c23; --line: #262a33; --text: #f3f4f6;
+    --dim: #9aa1ad; --faint: #6b7280; --accent: #0a84ff; --ok: #30d158; --warn: #ff9f0a; --bad: #ff453a;
+    --radius: 14px;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--bg); color: var(--text);
+    font: 15px/1.45 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, sans-serif; }
+  .wrap { max-width: 860px; margin: 0 auto; padding: 24px 16px 120px; }
+  header { display: flex; align-items: center; gap: 14px; margin: 8px 0 22px; }
+  .logo { width: 44px; height: 44px; border-radius: 12px; display: grid; place-items: center; font-weight: 800;
+    font-size: 22px; background: linear-gradient(135deg, #5ac8fa, #0a84ff); color: white; flex: none; }
+  h1 { font-size: 24px; margin: 0; letter-spacing: -0.3px; }
+  .sub { color: var(--dim); font-size: 13px; }
+  h2 { font-size: 17px; margin: 0 0 4px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 18px;
+    margin: 0 0 14px; }
+  .hint { color: var(--dim); font-size: 13px; margin: 0 0 12px; }
+  .banner { border-radius: var(--radius); padding: 14px 16px; margin: 0 0 14px; font-size: 14px; }
+  .banner.info { background: rgba(10,132,255,.12); border: 1px solid rgba(10,132,255,.45); }
+  .banner.warn { background: rgba(255,159,10,.12); border: 1px solid rgba(255,159,10,.5); }
+  .banner b { display: block; margin-bottom: 2px; }
+  label { display: block; font-size: 12px; color: var(--dim); margin: 10px 0 4px; font-weight: 600;
+    text-transform: uppercase; letter-spacing: .5px; }
+  input { width: 100%; padding: 11px 12px; border-radius: 10px; border: 1px solid var(--line); background: var(--panel2);
+    color: var(--text); font: inherit; outline: none; }
+  input:focus { border-color: var(--accent); }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0 14px; }
+  .grid .wide { grid-column: 1 / -1; }
+  @media (max-width: 600px) { .grid { grid-template-columns: 1fr; } }
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  button { font: inherit; font-weight: 600; border: 1px solid var(--line); background: var(--panel2); color: var(--text);
+    padding: 9px 14px; border-radius: 10px; cursor: pointer; }
+  button:hover { border-color: #3a404c; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: white; }
+  button.danger { color: var(--bad); }
+  button.small { padding: 6px 10px; font-size: 13px; }
+  button:disabled { opacity: .5; cursor: default; }
+  .entry { border: 1px solid var(--line); border-radius: 12px; padding: 4px 14px 14px; margin: 10px 0; background: #0e1015; }
+  .status { font-size: 13px; margin-left: 4px; }
+  .status.ok { color: var(--ok); } .status.bad { color: var(--bad); } .status.busy { color: var(--dim); }
+  .secret { position: relative; }
+  .secret button { position: absolute; right: 6px; top: 6px; padding: 5px 8px; font-size: 12px; }
+  .found { display: flex; gap: 10px; align-items: flex-start; padding: 10px 0; border-top: 1px solid var(--line); }
+  .found:first-child { border-top: 0; }
+  .found input { width: auto; margin-top: 4px; }
+  .tag { font-size: 11px; font-weight: 700; padding: 2px 7px; border-radius: 6px; background: var(--panel2);
+    color: var(--dim); text-transform: uppercase; letter-spacing: .4px; }
+  .tag.ok { color: var(--ok); } .tag.bad { color: var(--warn); }
+  .device { display: flex; justify-content: space-between; align-items: center; padding: 10px 0;
+    border-top: 1px solid var(--line); gap: 10px; }
+  .device:first-child { border-top: 0; }
+  .code { font: 700 22px/1 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: 3px; color: var(--accent); }
+  .savebar { position: fixed; left: 0; right: 0; bottom: 0; background: rgba(7,8,10,.92); backdrop-filter: blur(12px);
+    border-top: 1px solid var(--line); padding: 12px 16px calc(12px + env(safe-area-inset-bottom)); }
+  .savebar .inner { max-width: 860px; margin: 0 auto; display: flex; align-items: center; gap: 12px; }
+  .savebar .msg { flex: 1; color: var(--dim); font-size: 14px; }
+  .hidden { display: none !important; }
+  code { background: var(--panel2); padding: 1px 6px; border-radius: 6px; font-size: 13px; }
+  .login { max-width: 360px; margin: 12vh auto 0; }
+  details summary { cursor: pointer; color: var(--dim); font-size: 13px; margin-top: 8px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="logo">H</div>
+    <div>
+      <h1>Harbour setup</h1>
+      <div class="sub" id="ver">Gateway</div>
+    </div>
+  </header>
+
+  <!-- Log in -->
+  <div id="login" class="card login hidden">
+    <h2>Enter your gateway PIN</h2>
+    <p class="hint">The PIN you chose when you first set Harbour up.</p>
+    <input id="pin" type="password" inputmode="numeric" autocomplete="current-password" placeholder="PIN">
+    <div class="row" style="margin-top:12px">
+      <button class="primary" id="loginBtn">Log in</button><span id="loginMsg" class="status bad"></span>
+    </div>
+  </div>
+
+  <div id="app" class="hidden">
+    <div id="banners"></div>
+
+    <div class="card" id="devicesCard">
+      <h2>Your TVs and phones</h2>
+      <p class="hint">On a new TV, open Harbour and choose <b>Pair with the gateway</b>. Its code shows up here —
+        check it matches, then approve.</p>
+      <div id="pending"></div>
+      <div id="devices"></div>
+      <details><summary>Installing Harbour on a Fire TV</summary>
+        <p class="hint" style="margin-top:8px">Install <b>Downloader</b> from the Amazon app store, open it and type
+          <code id="apkUrl"></code>. It installs Harbour V3. Then open Harbour — it finds this gateway by itself.</p>
+      </details>
+    </div>
+
+    <div class="card">
+      <h2>Gateway</h2>
+      <div class="grid">
+        <div><label>Gateway PIN</label><div class="secret"><input id="f-token" type="password" autocomplete="new-password"
+          placeholder="At least 4 characters"><button type="button" data-reveal="f-token">Show</button></div></div>
+        <div><label>Region (for "streaming on")</label><input id="f-region" placeholder="AU"></div>
+      </div>
+      <p class="hint" style="margin-top:10px">The PIN protects this page and lets devices connect if you'd rather type it
+        than pair.</p>
+    </div>
+
+    <div class="card" id="detectCard">
+      <h2>Find my apps automatically</h2>
+      <p class="hint" id="detectHint"></p>
+      <div class="row"><button id="detectBtn">Find my apps</button><span id="detectMsg" class="status busy"></span></div>
+      <div id="found" style="margin-top:10px"></div>
+      <div class="row hidden" id="useRow" style="margin-top:8px"><button class="primary" id="useBtn">Use the ticked ones</button></div>
+    </div>
+
+    <div id="sections"></div>
+  </div>
+</div>
+
+<div class="savebar hidden" id="savebar">
+  <div class="inner">
+    <div class="msg" id="saveMsg">Changes aren't saved until you press Save.</div>
+    <button class="primary" id="saveBtn">Save</button>
+  </div>
+</div>
+
+<script>
+const SECTIONS = [
+  {key: "radarr", title: "Radarr", list: true, test: "radarr", hint: "Add one for each Radarr — for example an HD one and a 4K one.",
+   fields: [["name", "Name", "Radarr"], ["url", "Address", "http://192.168.1.10:7878"], ["api_key", "API key", "Settings → General", true],
+            ["icon", "Icon", "type 4k for a 4K library"]]},
+  {key: "sonarr", title: "Sonarr", list: true, test: "sonarr",
+   fields: [["name", "Name", "Sonarr"], ["url", "Address", "http://192.168.1.10:8989"], ["api_key", "API key", "Settings → General", true]]},
+  {key: "seerr", title: "Jellyseerr / Overseerr", test: "seerr", hint: "Powers Discover, title pages, cast and requests.",
+   fields: [["name", "Name", "Jellyseerr"], ["url", "Address", "http://192.168.1.10:5055"], ["api_key", "API key", "Settings → General", true]]},
+  {key: "plex", title: "Plex", test: "plex", hint: "For playing in Harbour and watched ticks.",
+   fields: [["url", "Address", "http://192.168.1.10:32400"], ["token", "Plex token", "", true]]},
+  {key: "prowlarr", title: "Prowlarr", test: "prowlarr", hint: "For the Indexers search page.",
+   fields: [["url", "Address", "http://192.168.1.10:9696"], ["api_key", "API key", "Settings → General", true]]},
+  {key: "newznab", title: "Usenet indexers not in Prowlarr", list: true, test: "newznab", optional: true,
+   fields: [["name", "Name", "NZBgeek"], ["url", "Address", "https://api.nzbgeek.info"], ["api_key", "API key", "", true]]},
+  {key: "nzbget", title: "NZBGet", test: "nzbget",
+   fields: [["name", "Name", "NZBGet"], ["url", "Address", "http://192.168.1.10:6789"], ["username", "Username", ""], ["password", "Password", "", true]]},
+  {key: "qbittorrent", title: "qBittorrent", test: "qbittorrent", hint: "Use an API key (qBittorrent 5.2+) or a username and password.",
+   fields: [["name", "Name", "qBittorrent"], ["url", "Address", "http://192.168.1.10:8080"], ["api_key", "API key", "", true],
+            ["username", "Username", ""], ["password", "Password", "", true]]},
+  {key: "filestation", title: "File Station", test: "filestation", hint: "For the Files page and saving screen recordings. Use a DSM user without 2-step verification.",
+   fields: [["url", "DSM address", "http://192.168.1.10:5000"], ["username", "DSM user", ""], ["password", "Password", "", true],
+            ["allowed_shares", "Shared folders Harbour may use", "/data"]]},
+  {key: "tmdb", title: "TMDB (optional)", test: "tmdb", optional: true, hint: "Free key from themoviedb.org → Settings → API (the long Read Access Token). Adds title logos and season trailers.",
+   fields: [["api_key", "API read access token", "", true]]},
+];
+
+let state = null, cfg = {}, dirty = false, found = [];
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;"}[c]));
+
+async function api(path, body) {
+  const r = await fetch(path, body === undefined ? {credentials: "same-origin"} :
+    {method: "POST", credentials: "same-origin", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
+  let j = {};
+  try { j = await r.json(); } catch (e) {}
+  if (!r.ok) { const err = new Error(j.error || `HTTP ${r.status}`); err.status = r.status; throw err; }
+  return j;
+}
+
+function markDirty() { dirty = true; $("savebar").classList.remove("hidden"); $("saveMsg").textContent = "You have unsaved changes."; }
+
+// ---- config <-> form
+function asObj(v) { return Array.isArray(v) ? (v[0] || {}) : (v || {}); }
+function asList(v) { return Array.isArray(v) ? v : (v ? [v] : []); }
+
+function renderSections() {
+  const host = state.host || "192.168.1.10";
+  $("sections").innerHTML = SECTIONS.map((s) => {
+    const entries = s.list ? asList(cfg[s.key]) : [asObj(cfg[s.key])];
+    const body = entries.map((e, i) => entryHtml(s, e, i, host)).join("");
+    return `<div class="card" data-sec="${s.key}"><h2>${s.title}</h2>${s.hint ? `<p class="hint">${s.hint}</p>` : ""}
+      <div class="entries">${body || (s.list ? '<p class="hint">None yet.</p>' : "")}</div>
+      ${s.list ? `<button class="small" data-add="${s.key}">+ Add ${s.title.replace(/s$/, "")}</button>` : ""}</div>`;
+  }).join("");
+}
+
+function entryHtml(s, e, i, host) {
+  const fields = s.fields.map(([k, label, ph, secret]) => {
+    let val = e[k] ?? "";
+    if (Array.isArray(val)) val = val.join(", ");
+    const placeholder = (ph || "").replace("192.168.1.10", host);
+    const id = `in-${s.key}-${i}-${k}`;
+    const input = `<input id="${id}" data-k="${k}" ${secret ? 'type="password" autocomplete="new-password"' : ""}
+      value="${esc(val)}" placeholder="${esc(placeholder)}">`;
+    return `<div class="${k === "url" || k === "allowed_shares" ? "wide" : ""}"><label>${label}</label>
+      ${secret ? `<div class="secret">${input}<button type="button" data-reveal="${id}">Show</button></div>` : input}</div>`;
+  }).join("");
+  return `<div class="entry" data-i="${i}"><div class="grid">${fields}</div>
+    <div class="row" style="margin-top:12px"><button class="small" data-test="${s.key}">Test</button>
+    ${s.list ? `<button class="small danger" data-remove="${s.key}">Remove</button>` : ""}
+    <span class="status"></span></div></div>`;
+}
+
+function readEntry(el) {
+  const o = {};
+  el.querySelectorAll("input[data-k]").forEach((inp) => { const v = inp.value.trim(); if (v) o[inp.dataset.k] = v; });
+  return o;
+}
+
+function collect() {
+  const out = JSON.parse(JSON.stringify(cfg));
+  out.token = $("f-token").value.trim();
+  const region = $("f-region").value.trim();
+  if (region) out.region = region; else delete out.region;
+  SECTIONS.forEach((s) => {
+    const shown = new Set(s.fields.map((f) => f[0]));
+    // keep settings the page doesn't show (ids, options) but take every shown field from the form
+    const extras = (o) => Object.fromEntries(Object.entries(o || {}).filter(([k]) => !shown.has(k)));
+    const old = s.list ? asList(cfg[s.key]) : [asObj(cfg[s.key])];
+    const els = [...document.querySelectorAll(`[data-sec="${s.key}"] .entry`)];
+    const vals = els.map((el) => {
+      const v = readEntry(el);
+      return Object.keys(v).length ? Object.assign(extras(old[Number(el.dataset.i)]), v) : null;
+    }).filter(Boolean);
+    if (s.key === "filestation" && typeof vals[0]?.allowed_shares === "string") vals[0].allowed_shares = vals[0].allowed_shares.split(",").map((x) => x.trim()).filter(Boolean);
+    if (s.list) { if (vals.length) out[s.key] = vals; else delete out[s.key]; }
+    else { if (vals.length) out[s.key] = vals[0]; else delete out[s.key]; }
+  });
+  return out;
+}
+
+// ---- auto-detect
+async function detect() {
+  $("detectBtn").disabled = true;
+  $("detectMsg").className = "status busy"; $("detectMsg").textContent = "Looking through your docker folder…";
+  try {
+    const r = await api("/setup/api/detect");
+    found = r.found || [];
+    $("detectMsg").textContent = found.length ? `Found ${found.length}. Ticked ones answered on this NAS.` : "Didn't find any app settings in that folder.";
+    $("found").innerHTML = found.map((f, i) => `<div class="found"><input type="checkbox" id="fd${i}" ${f.verified ? "checked" : ""}>
+      <label for="fd${i}" style="all:unset;flex:1;cursor:pointer"><b>${esc(f.name)}</b> <span class="tag ${f.verified ? "ok" : "bad"}">${f.verified ? "works" : "check"}</span><br>
+      <span class="sub">${esc(f.url)} · from ${esc(f.source)}${f.note ? " · " + esc(f.note) : ""}${!f.verified && f.message ? " · " + esc(f.message) : ""}</span></label></div>`).join("");
+    $("useRow").classList.toggle("hidden", !found.length);
+  } catch (e) {
+    $("detectMsg").className = "status bad"; $("detectMsg").textContent = e.message;
+  } finally { $("detectBtn").disabled = false; }
+}
+
+function useFound() {
+  cfg = collect();
+  found.forEach((f, i) => {
+    if (!$("fd" + i).checked) return;
+    const {kind, source, verified, message, note, ...conf} = f;
+    if (kind === "radarr" || kind === "sonarr") {
+      const list = asList(cfg[kind]);
+      const at = list.findIndex((x) => x.url === conf.url || x.id === conf.id);
+      if (at >= 0) list[at] = Object.assign(list[at], conf); else list.push(conf);
+      cfg[kind] = list;
+    } else {
+      delete conf.id;
+      cfg[kind] = Object.assign({}, asObj(cfg[kind]), conf);
+    }
+  });
+  renderSections(); markDirty();
+  $("saveMsg").textContent = "Added — check the details below, then Save.";
+}
+
+// ---- devices
+function renderDevices() {
+  $("pending").innerHTML = (state.pending || []).map((p) => `<div class="device"><div><div class="code">${esc(p.code)}</div>
+    <div class="sub">${esc(p.name)} wants to connect${p.ip ? " · " + esc(p.ip) : ""}</div></div>
+    <div class="row"><button class="small primary" data-approve="${p.id}">Approve</button>
+    <button class="small danger" data-deny="${p.id}">Deny</button></div></div>`).join("");
+  const devs = state.devices || [];
+  $("devices").innerHTML = devs.length ? devs.map((d) => `<div class="device"><div><b>${esc(d.name)}</b>
+    <div class="sub">Paired ${esc(d.added || "")}</div></div><button class="small danger" data-unpair="${d.index}">Remove</button></div>`).join("")
+    : (state.pending?.length ? "" : '<p class="hint" style="margin:0">No devices paired yet.</p>');
+}
+
+function renderBanners() {
+  const b = [];
+  if (state.firstRun) b.push(`<div class="banner info"><b>Welcome to Harbour</b>Choose a PIN, add your apps (or let Harbour find them), then press Save.</div>`);
+  if (state.update) b.push(`<div class="banner info"><b>Gateway ${esc(state.update)} is available</b>In Container Manager: <b>Image</b> → select <code>harbour-gateway</code> → <b>Update</b>. Your settings are kept.</div>`);
+  if (!state.writable) b.push(`<div class="banner warn"><b>Settings can't be saved yet</b>The gateway can't write to its config folder. In your docker-compose use <code>./config:/config</code> (without <code>:ro</code>), and in File Station give your Docker user Read/Write on that folder.</div>`);
+  $("banners").innerHTML = b.join("");
+}
+
+// ---- load
+async function load() {
+  try {
+    state = await api("/setup/api/state");
+  } catch (e) {
+    if (e.status === 401) { $("login").classList.remove("hidden"); $("app").classList.add("hidden"); $("pin").focus(); return; }
+    document.body.insertAdjacentHTML("afterbegin", `<div class="banner warn">${esc(e.message)}</div>`); return;
+  }
+  cfg = state.config || {};
+  $("login").classList.add("hidden"); $("app").classList.remove("hidden");
+  $("ver").textContent = `Gateway ${state.version}`;
+  $("apkUrl").textContent = `${location.hostname}:${location.port || 80}/v3`;
+  $("f-token").value = cfg.token || "";
+  $("f-region").value = cfg.region || "";
+  $("detectHint").innerHTML = state.stack
+    ? "Harbour can read the API keys straight from your apps' own settings files, so you don't have to copy them."
+    : "To use this, give the gateway read-only access to your docker folder: add <code>- /volume1/docker:/stack:ro</code> under <code>volumes:</code> in its docker-compose, then restart it.";
+  $("detectBtn").disabled = !state.stack;
+  renderBanners(); renderSections(); renderDevices();
+  if (state.firstRun) { $("savebar").classList.remove("hidden"); $("saveMsg").textContent = "Nothing saved yet."; }
+}
+
+async function refreshDevices() {
+  if (!state || document.hidden) return;
+  try {
+    const s = await api("/setup/api/state");
+    state.pending = s.pending; state.devices = s.devices; renderDevices();
+  } catch (e) {}
+}
+
+// ---- events
+document.addEventListener("click", async (ev) => {
+  const t = ev.target;
+  if (t.dataset.reveal) { const inp = $(t.dataset.reveal); inp.type = inp.type === "password" ? "text" : "password"; t.textContent = inp.type === "password" ? "Show" : "Hide"; return; }
+  if (t.dataset.add) { cfg = collect(); cfg[t.dataset.add] = [...asList(cfg[t.dataset.add]), {}]; renderSections(); markDirty(); return; }
+  if (t.dataset.remove) { t.closest(".entry").remove(); cfg = collect(); renderSections(); markDirty(); return; }
+  if (t.dataset.test) {
+    const entry = t.closest(".entry"), st = entry.querySelector(".status");
+    st.className = "status busy"; st.textContent = "Testing…";
+    try {
+      const conf = readEntry(entry);
+      if (t.dataset.test === "filestation" && conf.allowed_shares) conf.allowed_shares = conf.allowed_shares.split(",").map((x) => x.trim());
+      const r = await api("/setup/api/test", {kind: SECTIONS.find((s) => s.key === t.dataset.test).test, conf});
+      st.className = "status " + (r.ok ? "ok" : "bad"); st.textContent = r.message;
+    } catch (e) { st.className = "status bad"; st.textContent = e.message; }
+    return;
+  }
+  if (t.dataset.approve || t.dataset.deny) {
+    t.disabled = true;
+    try { await api("/setup/api/pair", {id: t.dataset.approve || t.dataset.deny, approve: !!t.dataset.approve}); } catch (e) { alert(e.message); }
+    refreshDevices(); return;
+  }
+  if (t.dataset.unpair !== undefined) {
+    if (!confirm("Remove this device? It will need pairing again.")) return;
+    try { await api("/setup/api/device/remove", {index: Number(t.dataset.unpair)}); } catch (e) { alert(e.message); }
+    refreshDevices(); return;
+  }
+});
+document.addEventListener("input", (ev) => { if (ev.target.closest("#app")) markDirty(); });
+$("detectBtn").onclick = detect;
+$("useBtn").onclick = useFound;
+$("loginBtn").onclick = async () => {
+  try { await api("/setup/api/login", {pin: $("pin").value}); $("loginMsg").textContent = ""; load(); }
+  catch (e) { $("loginMsg").textContent = e.message; }
+};
+$("pin").addEventListener("keydown", (e) => { if (e.key === "Enter") $("loginBtn").click(); });
+$("saveBtn").onclick = async () => {
+  $("saveBtn").disabled = true; $("saveMsg").textContent = "Saving…";
+  try {
+    const r = await api("/setup/api/save", {config: collect()});
+    dirty = false; $("saveMsg").textContent = r.message || "Saved ✓";
+    await load(); $("savebar").classList.remove("hidden"); $("saveMsg").textContent = "Saved ✓ — Harbour is using these settings.";
+  } catch (e) { $("saveMsg").textContent = "⚠ " + e.message; }
+  finally { $("saveBtn").disabled = false; }
+};
+window.addEventListener("beforeunload", (e) => { if (dirty) { e.preventDefault(); e.returnValue = ""; } });
+setInterval(refreshDevices, 3000);
+load();
+</script>
+</body>
+</html>

@@ -1,0 +1,92 @@
+name: Build Harbour V3 APK
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "android-v3/**"
+      - ".github/workflows/build-apk-v3.yml"
+  workflow_dispatch:
+    inputs:
+      bridge:
+        description: "Also publish as a v2.* release so Harbour v2 can update itself to V3"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      VERSION_NAME: 3.0.${{ github.run_number }}
+      KEYSTORE_B64: ${{ secrets.HARBOUR_KEYSTORE_B64 }}
+      HARBOUR_KEYSTORE_PASSWORD: ${{ secrets.HARBOUR_KEYSTORE_PASSWORD }}
+    defaults:
+      run:
+        working-directory: android-v3
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # V3 continues from v2 (same app id), so its version codes start above every v2 build.
+      - name: Version code
+        working-directory: .
+        run: echo "VERSION_CODE=$((300000 + ${{ github.run_number }}))" >> "$GITHUB_ENV"
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.11.1"
+
+      - name: Signing key (optional but recommended)
+        run: |
+          if [ -n "$KEYSTORE_B64" ]; then
+            echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/harbour.jks"
+            echo "HARBOUR_KEYSTORE=$RUNNER_TEMP/harbour.jks" >> "$GITHUB_ENV"
+            echo "Using your release key."
+          else
+            echo "::warning::No HARBOUR_KEYSTORE_B64 secret — APK is debug-signed, so updates need an uninstall first. See README."
+          fi
+
+      - name: Build
+        run: |
+          set -o pipefail
+          if ! gradle assembleRelease --no-daemon --stacktrace 2>&1 | tee build.log; then
+            grep -E "^e: " build.log | head -30 | while read -r l; do echo "::error::$l"; done
+            exit 1
+          fi
+
+      - name: Collect APK
+        run: |
+          mkdir -p ../dist
+          cp app/build/outputs/apk/release/*.apk ../dist/HarbourV3.apk
+          ls -la ../dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: HarbourV3-${{ env.VERSION_NAME }}
+          path: dist/HarbourV3.apk
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ env.VERSION_NAME }}
+          name: Harbour V3 ${{ env.VERSION_NAME }}
+          make_latest: false
+          files: dist/HarbourV3.apk
+
+      - name: Bridge release for Harbour v2
+        if: ${{ inputs.bridge }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v2.0.${{ env.VERSION_CODE }}
+          name: Upgrade to Harbour V3 (${{ env.VERSION_NAME }})
+          make_latest: false
+          body: Lets Harbour v2's in-app updater install Harbour V3. Same app, keeps your settings.
+          files: dist/HarbourV3.apk
