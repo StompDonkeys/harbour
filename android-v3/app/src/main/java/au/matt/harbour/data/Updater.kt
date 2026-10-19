@@ -41,10 +41,10 @@ object Updater {
     fun installedVersionName(context: Context): String =
         runCatching { context.packageManager.getPackageInfo(context.packageName, 0).versionName }.getOrNull() ?: "?"
 
-    /** Returns the newest Harbour v2 release (tags v2.*) if it's newer than what's installed, else null. */
+    /** Returns the newest Harbour V3 release (tags v3.*) if it's newer than what's installed, else null. */
     suspend fun check(context: Context, repo: String): UpdateInfo? = withContext(Dispatchers.IO) {
         val req = Request.Builder()
-            .url("https://api.github.com/repos/$repo/releases?per_page=30")
+            .url("https://api.github.com/repos/$repo/releases?per_page=100")
             .header("Accept", "application/vnd.github+json")
             .build()
         val body = http.newCall(req).execute().use { r ->
@@ -52,11 +52,11 @@ object Updater {
             r.body?.string().orEmpty()
         }
         val rel = json.parseToJsonElement(body).jsonArray.map { it.jsonObject }
-            .firstOrNull { it["tag_name"]?.jsonPrimitive?.content?.startsWith("v2.") == true }
+            .firstOrNull { it["tag_name"]?.jsonPrimitive?.content?.startsWith("v3.") == true }
             ?: return@withContext null
         val tag = rel["tag_name"]?.jsonPrimitive?.content ?: return@withContext null
-        // Tags are v2.0.<build number>; the build number is the versionCode.
-        val code = tag.substringAfterLast('.').toLongOrNull() ?: return@withContext null
+        // Tags are v3.0.<build number>; the versionCode is 300000 + the build number.
+        val code = 300000 + (tag.substringAfterLast('.').toLongOrNull() ?: return@withContext null)
         val asset = rel["assets"]?.jsonArray
             ?.map { it.jsonObject }
             ?.firstOrNull { it["name"]?.jsonPrimitive?.content?.endsWith(".apk") == true }

@@ -1,11 +1,11 @@
-name: Build Harbour v2 APK
+name: Build Harbour V3 APK
 
 on:
   push:
     branches: [main]
     paths:
-      - "android-v2/**"
-      - ".github/workflows/build-apk-v2.yml"
+      - "android-v3/**"
+      - ".github/workflows/build-apk-v3.yml"
   workflow_dispatch:
 
 permissions:
@@ -15,16 +15,20 @@ jobs:
   build:
     runs-on: ubuntu-latest
     env:
-      VERSION_CODE: ${{ github.run_number }}
-      VERSION_NAME: 2.0.${{ github.run_number }}
+      VERSION_NAME: 3.0.${{ github.run_number }}
       KEYSTORE_B64: ${{ secrets.HARBOUR_KEYSTORE_B64 }}
       HARBOUR_KEYSTORE_PASSWORD: ${{ secrets.HARBOUR_KEYSTORE_PASSWORD }}
     defaults:
       run:
-        working-directory: android-v2
+        working-directory: android-v3
 
     steps:
       - uses: actions/checkout@v4
+
+      # V3 continues from v2 (same app id), so its version codes start above every v2 build.
+      - name: Version code
+        working-directory: .
+        run: echo "VERSION_CODE=$((300000 + ${{ github.run_number }}))" >> "$GITHUB_ENV"
 
       - uses: actions/setup-java@v5
         with:
@@ -56,18 +60,18 @@ jobs:
       - name: Collect APK
         run: |
           mkdir -p ../dist
-          cp app/build/outputs/apk/release/*.apk ../dist/HarbourV2.apk
+          cp app/build/outputs/apk/release/*.apk ../dist/HarbourV3.apk
           ls -la ../dist
 
       - uses: actions/upload-artifact@v4
         with:
-          name: HarbourV2-${{ env.VERSION_NAME }}
-          path: dist/HarbourV2.apk
+          name: HarbourV3-${{ env.VERSION_NAME }}
+          path: dist/HarbourV3.apk
 
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ env.VERSION_NAME }}
-          name: Harbour v2 ${{ env.VERSION_NAME }}
+          name: Harbour V3 ${{ env.VERSION_NAME }}
           make_latest: false
-          files: dist/HarbourV2.apk
+          files: dist/HarbourV3.apk

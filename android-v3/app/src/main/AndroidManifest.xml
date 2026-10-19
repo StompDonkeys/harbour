@@ -16,7 +16,7 @@
         android:allowBackup="false"
         android:banner="@drawable/banner"
         android:icon="@mipmap/ic_launcher"
-        android:label="Harbour v2"
+        android:label="Harbour V3"
         android:supportsRtl="true"
         android:theme="@style/Theme.Harbour"
         android:usesCleartextTraffic="true">

@@ -100,13 +100,20 @@ fun SettingsScreen(
         Text(if (firstRun) "Welcome to Harbour" else "Settings",
             color = HColors.Text, fontSize = 30.sp, fontWeight = FontWeight.Bold)
         Text(
-            "Harbour talks to the small gateway container on your Synology, which holds the API keys " +
-                "for your apps. The access token is the \"token\" in its config.json — a short PIN is fine.",
+            "Harbour talks to the Harbour gateway on your Synology, which holds the keys for all your apps. " +
+                "Pair this TV with it below — or type its address and PIN yourself.",
             color = HColors.TextDim, fontSize = 15.sp, modifier = Modifier.widthIn(max = 640.dp),
         )
         Spacer(Modifier.height(6.dp))
+        ConnectPanel(autoStart = firstRun, currentUrl = url, onConnected = { u, t ->
+            url = u
+            token = t
+            onSaved(u, t)
+        })
+        Text(if (firstRun) "Or enter the gateway's address and PIN yourself" else "Connection",
+            color = HColors.TextDim, fontSize = 13.sp, fontWeight = FontWeight.Bold)
         SettingRow("Gateway address", url, first) { editing = "url" }
-        SettingRow("Access token", if (token.isBlank()) "Not set" else "•".repeat(token.length.coerceAtMost(16)), null) {
+        SettingRow("PIN or device key", if (token.isBlank()) "Not set" else "•".repeat(token.length.coerceAtMost(16)), null) {
             editing = "token"
         }
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {

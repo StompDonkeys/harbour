@@ -137,10 +137,13 @@ fun HarbourApp(prefs: Prefs) {
         for (s in warm) {
             if (cache.homes[s.key] == null) runCatching { cache.homes[s.key] = g.home(s) }
         }
+        cfg.gatewayUpdate?.let {
+            toaster.show("Gateway $it is available — update it in Container Manager: Image → harbour-gateway → Update")
+        }
         // Quietly look for a newer build on GitHub.
         runCatching { Updater.check(context, cfg.repo) }.getOrNull()?.let {
             update = it
-            toaster.show("Harbour v2 ${it.versionName} is available — open Settings to install")
+            toaster.show("Harbour V3 ${it.versionName} is available — open Settings to install")
         }
     }
 

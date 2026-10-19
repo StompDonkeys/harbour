@@ -12,11 +12,12 @@ android {
     compileSdk = 35
 
     defaultConfig {
+        // Kept from v2 so Harbour V3 installs over it and keeps your settings.
         applicationId = "au.matt.harbour.v2"
         minSdk = 25          // Fire OS 6+; Fire TV Stick 4K Max runs Fire OS 7/8
         targetSdk = 34
         versionCode = (System.getenv("VERSION_CODE") ?: "1").toInt()
-        versionName = System.getenv("VERSION_NAME") ?: "2.0.0-dev"
+        versionName = System.getenv("VERSION_NAME") ?: "3.0.0-dev"
     }
 
     signingConfigs {

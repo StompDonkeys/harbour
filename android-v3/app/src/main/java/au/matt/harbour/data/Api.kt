@@ -47,6 +47,8 @@ data class GatewayConfig(
     val dashboard: Boolean = false,
     val trailers: Boolean = false,
     val indexers: Boolean = false,
+    /** A newer gateway image is published (version), if any. */
+    val gatewayUpdate: String? = null,
     val repo: String = "StompDonkeys/harbour",
     val version: String = "",
 )
@@ -626,3 +628,15 @@ suspend fun Gateway.indexerGrab(id: String, target: String): ActionResult =
         put("id", id)
         put("target", target)
     })
+
+// ------------------------------------------------------------------ pairing (V3)
+
+@Serializable
+data class PairStart(val id: String, val code: String, val expires: Int = 600)
+
+@Serializable
+data class PairStatus(val status: String, val token: String? = null)
+
+suspend fun Gateway.pairStart(name: String): PairStart = post("/api/pair/start", buildJsonObject { put("name", name) })
+
+suspend fun Gateway.pairStatus(id: String): PairStatus = get("/api/pair/status?id=${Gateway.enc(id)}")

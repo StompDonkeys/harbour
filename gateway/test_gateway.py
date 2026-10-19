@@ -898,7 +898,8 @@ def test_v2_libraries_and_dashboard(client):
     responses.get("http://nas:7879/api/v3/calendar", json=[])
     responses.get("http://nas:8989/api/v3/calendar", json=[
         {"id": 5, "seriesId": 1, "seasonNumber": 2, "episodeNumber": 3, "title": "Out now", "hasFile": True,
-         "monitored": True, "airDateUtc": iso((today - timedelta(hours=1)).astimezone(timezone.utc)), "series": show},
+         "monitored": True, "airDateUtc": iso(today.replace(hour=0, minute=1, second=0).astimezone(timezone.utc)),
+         "series": show},
         {"id": 6, "seriesId": 1, "seasonNumber": 2, "episodeNumber": 4, "title": "Next", "hasFile": False,
          "monitored": True, "airDateUtc": iso((today + timedelta(days=2)).astimezone(timezone.utc)), "series": show}])
     responses.get("http://nas:8989/api/v3/wanted/missing", json={"records": []})

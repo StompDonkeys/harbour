@@ -31,7 +31,11 @@ jobs:
         working-directory: gateway
         run: |
           pip install -q flask requests pytest responses
-          pytest -q test_gateway.py
+          set -o pipefail
+          if ! pytest -q test_gateway.py 2>&1 | tee test.log; then
+            grep -E "^(FAILED|ERROR|E )" test.log | head -20 | while read -r l; do echo "::error::$l"; done
+            exit 1
+          fi
 
       - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
