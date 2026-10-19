@@ -9,7 +9,7 @@ services:
     ports:
       - "8765:8765"
     volumes:
-      - ./config:/config            # settings saved from the setup page
+      - ./config:/config            # settings saved from the setup page and the iPhone app
       - /volume1/docker:/stack:ro   # optional: lets the setup page find your apps' API keys
     environment:
       - TZ=Australia/Sydney

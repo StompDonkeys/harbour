@@ -3697,20 +3697,26 @@ def warm_loop():
 PUBLIC = ("/", "/apk", "/Harbour.apk", "/HarbourV2.apk", "/HarbourV3.apk", "/v3", "/setup",
           "/api/pair/start", "/api/pair/status", "/setup/api/login", "/favicon.ico")
 
+import web_access  # noqa: E402  (iPhone web app: login, settings, /m)
+
+WEB = web_access.install(app, get_cfg=lambda: CFG, config_path=CONFIG_PATH, valid_token=valid_token,
+                         save_config=lambda c: save_config(normalise_config(c)), test_service=test_service,
+                         ApiError=ApiError, FileStation=FileStation)
+
 
 @app.before_request
 def check_token():
+    """Home network: the gateway PIN or a paired device key, as before. Through the reverse proxy:
+    the iPhone web app's password login (the PIN and device keys aren't accepted from outside)."""
     path = request.path.lower()
     if path in [p.lower() for p in PUBLIC]:
-        return None
+        return WEB["remote_guard"](path)
     if path.startswith("/setup/"):
+        blocked = WEB["remote_guard"](path)
+        if blocked:
+            return blocked
         return None if setup_authed() else (jsonify(error="Log in to the setup page first"), 401)
-    if not CFG.get("token"):
-        return jsonify(error="The gateway isn't set up yet — open http://<your NAS>:8765/setup"), 503
-    given = request.headers.get("X-Token") or request.args.get("t") or ""
-    if not valid_token(given):
-        return jsonify(error="Wrong access token — pair this device again from Harbour's settings"), 401
-    return None
+    return WEB["check_access"]()
 
 
 @app.errorhandler(ApiError)
@@ -3736,8 +3742,10 @@ def on_error(e):
 @app.get("/")
 def root():
     # Apps look for this answer when they search the network for a gateway.
+    # Browsers: the iPhone app once the gateway is set up (or from outside), otherwise the setup page.
     if "text/html" in (request.headers.get("Accept") or "") and not request.args.get("json"):
-        return Response(status=302, headers={"Location": "/setup"})
+        to = "/m/" if CFG.get("token") or WEB["is_remote"]() else "/setup"
+        return Response(status=302, headers={"Location": to})
     return jsonify(name="Harbour gateway", app="harbour-gateway", version=VERSION, ok=True,
                    setup=bool(CFG.get("token")))
 

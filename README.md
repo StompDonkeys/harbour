@@ -61,9 +61,28 @@ Make sure your Docker user has **Read/Write** on that folder (File Station → f
 | **Files** | Browse, move, copy, rename and delete on the NAS. |
 | **Settings** | Pairing, Plex profile, updates, demo screen recording (saved to the NAS). |
 
+## iPhone app
+
+The gateway also serves an iPhone app at `/m/`: Library (Radarr, Radarr 4K, Sonarr), Discover (Jellyseerr requests), Calendar, Downloads, Files and Settings, with manual search, per-episode actions and trailers. **Settings** edits every service's address and API key (with **Test connection**), and saving takes effect straight away for the TVs too. Nothing to install from the App Store.
+
+1. **At home**, open `http://<your NAS>:8765/` in Safari (it opens the app once the gateway is set up). Enter your **gateway PIN** once, then choose a password (8+ characters). Every phone uses that password from then on.
+2. **Add to Home Screen:** Safari → Share → *Add to Home Screen*. It opens full screen with the Harbour icon.
+3. **Away from home (optional):** DSM → Control Panel → Login Portal → Advanced → **Reverse Proxy** → Create:
+   - Source: `HTTPS`, hostname e.g. `harbour.plexstation.synology.me`, port `443`
+   - Destination: `HTTP`, `localhost`, port `8765`
+   - Security → Certificate: make sure it covers that hostname and assign it to this entry.
+   - **Check it:** `https://harbour.plexstation.synology.me/api/login/status` must say `"remote":true`. If it says `false`, add a custom header on the proxy entry: `X-Forwarded-For` = `$proxy_add_x_forwarded_for`.
+   Then add *that* address to your Home Screen instead; it works at home and away.
+
+**What's allowed from outside.** Through the reverse proxy only the iPhone app's password works. The gateway PIN and paired-TV keys are refused, and the setup page and TV pairing are home-network only, so the TVs never need to be reachable from the internet. Never forward port 8765 on your router directly.
+
+**Security notes.** The password is stored hashed in `config.json` (`"web"`). Sign-ins last 180 days per phone; *Settings → Change password* signs out every other phone. Five wrong passwords in 15 minutes locks sign-in for 15 minutes. API keys and passwords are never sent to the phone; Settings only shows whether each one is set.
+
+**Bigger screens and the iPhone Duo.** On a normal phone, or the Duo's cover screen, every page fills the screen. Open the Duo (or turn a phone sideways, or use an iPad) and Library, Discover, Calendar, Files and Settings go side by side: the list on the left half, what you opened on the right, split at the fold. Folding and unfolding keeps your place. If Safari reports the hinge position (Viewport Segments API), the split follows it exactly.
+
 ## Folders
 
-- `gateway/` — the gateway (Flask, `app.py` + `setup.html`), built into the image by GitHub Actions on every change.
+- `gateway/` — the gateway (Flask, `app.py` + `setup.html`, plus the iPhone app: `web_access.py` + `web/`), built into the image by GitHub Actions on every change.
 - `android-v3/` — Harbour V3 (Kotlin / Compose for TV). Same app id as v2, so it installs over it.
 - `android/` — the original Harbour (v1), kept as is.
 

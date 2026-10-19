@@ -6,7 +6,8 @@ COPY --from=denoland/deno:bin /deno /usr/local/bin/deno
 WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
-COPY app.py setup.html ./
+COPY app.py setup.html web_access.py ./
+COPY web/ web/
 
 ARG VERSION=3.0.0-dev
 ENV HARBOUR_VERSION=$VERSION
