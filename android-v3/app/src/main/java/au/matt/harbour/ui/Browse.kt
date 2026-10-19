@@ -38,7 +38,7 @@ import au.matt.harbour.data.search
  * For Seerr it's a TMDB search.
  */
 @Composable
-fun BrowseScreen(svc: ServiceInfo, searchFirst: Boolean, onOpen: (String) -> Unit, externalQuery: String? = null) {
+fun BrowseScreen(svc: ServiceInfo, searchFirst: Boolean, onOpen: (String) -> Unit, externalQuery: String? = null, onlyKind: String? = null) {
     val gw = LocalGateway.current
     val cache = LocalCache.current
     val remote = svc.isDiscover
@@ -79,7 +79,7 @@ fun BrowseScreen(svc: ServiceInfo, searchFirst: Boolean, onOpen: (String) -> Uni
     }
 
     val shown: List<MediaItem> = if (remote) {
-        results.orEmpty()
+        results.orEmpty().filter { onlyKind == null || it.id.startsWith("$onlyKind-") }
     } else {
         val q = query.trim()
         all.orEmpty().filter { q.isEmpty() || it.title.contains(q, ignoreCase = true) }

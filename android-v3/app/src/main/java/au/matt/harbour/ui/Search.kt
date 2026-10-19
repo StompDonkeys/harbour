@@ -13,31 +13,49 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import au.matt.harbour.data.ServiceInfo
+import kotlinx.coroutines.delay
 
 /**
- * One search for everything: type once, then flip between titles (movies & TV to add or open)
- * and raw indexer releases (send straight to NZBGet / qBittorrent).
+ * One search for everything. Pick what you're after first — Movies, TV or Indexers — then type.
+ * Switching afterwards re-runs the same words in the other place.
  */
 @Composable
 fun SearchScreen(hub: ServiceInfo, indexers: Boolean, onOpen: (String) -> Unit) {
     var query by rememberSaveable { mutableStateOf("") }
-    var mode by rememberSaveable { mutableStateOf("titles") }   // titles | indexers
-    var asking by rememberSaveable { mutableStateOf(true) }
+    var mode by rememberSaveable { mutableStateOf("") }   // "" (not chosen) | movie | tv | indexers
+    var asking by rememberSaveable { mutableStateOf(false) }
+    val firstChoice = remember { FocusRequester() }
+    val searchBtn = remember { FocusRequester() }
     val sink = LocalBackdropSink.current
-    if (mode == "indexers") SideEffect { sink(null) }
+    if (mode != "movie" && mode != "tv") SideEffect { sink(null) }
+
+    fun choose(m: String) {
+        mode = m
+        if (query.isBlank()) asking = true
+    }
+
+    val label = when (mode) {
+        "movie" -> "movies"
+        "tv" -> "TV shows"
+        "indexers" -> "your indexers"
+        else -> ""
+    }
 
     Column(Modifier.fillMaxSize()) {
         Row(
@@ -49,30 +67,49 @@ fun SearchScreen(hub: ServiceInfo, indexers: Boolean, onOpen: (String) -> Unit) 
                 Text("Search", fontSize = 26.sp, fontWeight = FontWeight.Bold)
                 Text(
                     when {
-                        query.isBlank() -> if (indexers) "Movies & TV, or your indexers directly" else "Find any movie or show"
-                        mode == "indexers" -> "“$query” on your indexers"
-                        else -> "“$query” in movies & TV"
+                        mode.isEmpty() -> "What are you looking for?"
+                        query.isBlank() -> "Search $label"
+                        else -> "“$query” in $label"
                     },
                     color = HColors.TextDim, fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
                 )
             }
+            TvButton("Movies", { choose("movie") }, style = if (mode == "movie") "primary" else null,
+                icon = HIcons.Movie, focusRequester = firstChoice)
+            TvButton("TV", { choose("tv") }, style = if (mode == "tv") "primary" else null, icon = HIcons.Tv)
             if (indexers) {
-                FilterChip("Movies & TV", mode == "titles") { mode = "titles" }
-                FilterChip("Indexers", mode == "indexers") { mode = "indexers" }
-                Spacer(Modifier.width(6.dp))
+                TvButton("Indexers", { choose("indexers") }, style = if (mode == "indexers") "primary" else null,
+                    icon = HIcons.ManageSearch)
             }
-            TvButton(if (query.isBlank()) "Search" else "New search", { asking = true },
-                style = "primary", icon = Icons.Filled.Search)
+            if (mode.isNotEmpty()) {
+                Spacer(Modifier.width(6.dp))
+                TvButton(if (query.isBlank()) "Search" else "New search", { asking = true },
+                    icon = Icons.Filled.Search, focusRequester = searchBtn)
+            }
         }
         Box(Modifier.weight(1f)) {
-            if (mode == "indexers" && indexers) IndexerScreen(externalQuery = query)
-            else BrowseScreen(hub, searchFirst = false, onOpen = onOpen, externalQuery = query)
+            when (mode) {
+                "" -> Text(
+                    "Choose Movies, TV" + (if (indexers) " or Indexers" else "") + " above, then type what you're after.",
+                    color = HColors.TextDim, fontSize = 16.sp, modifier = Modifier.padding(start = 44.dp, top = 24.dp),
+                )
+                "indexers" -> IndexerScreen(externalQuery = query)
+                else -> BrowseScreen(hub, searchFirst = false, onOpen = onOpen, externalQuery = query, onlyKind = mode)
+            }
+        }
+    }
+
+    // Land on the choices when the page opens fresh.
+    LaunchedEffect(Unit) {
+        if (mode.isEmpty()) {
+            delay(80)
+            runCatching { firstChoice.requestFocus() }
         }
     }
 
     if (asking) {
         TextInputDialog(
-            title = if (mode == "indexers") "Search indexers" else "Search movies & TV",
+            title = "Search $label",
             initial = query,
             imeAction = ImeAction.Search,
             onDone = {
