@@ -138,7 +138,7 @@ fun HarbourApp(prefs: Prefs) {
             if (cache.homes[s.key] == null) runCatching { cache.homes[s.key] = g.home(s) }
         }
         cfg.gatewayUpdate?.let {
-            toaster.show("Gateway $it is available — update it in Container Manager: Image → harbour-gateway → Update")
+            toaster.show("Gateway $it is available — the setup page shows how to update it")
         }
         // Quietly look for a newer build on GitHub.
         runCatching { Updater.check(context, cfg.repo) }.getOrNull()?.let {

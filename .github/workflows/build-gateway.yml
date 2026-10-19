@@ -68,4 +68,4 @@ jobs:
           make_latest: false
           body: |
             Docker image: `${{ env.IMAGE }}:${{ env.VERSION }}` (also `:latest`).
-            Update in Synology Container Manager: Image → harbour-gateway → Update.
+            Update in Synology Container Manager: Project → harbour-gateway → Action → Stop, then Clean; Image → delete the harbour-gateway image; Project → Action → Build.

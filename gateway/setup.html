@@ -286,7 +286,7 @@ function renderDevices() {
 function renderBanners() {
   const b = [];
   if (state.firstRun) b.push(`<div class="banner info"><b>Welcome to Harbour</b>Choose a PIN, add your apps (or let Harbour find them), then press Save.</div>`);
-  if (state.update) b.push(`<div class="banner info"><b>Gateway ${esc(state.update)} is available</b>In Container Manager: <b>Image</b> → select <code>harbour-gateway</code> → <b>Update</b>. Your settings are kept.</div>`);
+  if (state.update) b.push(`<div class="banner info"><b>Gateway ${esc(state.update)} is available</b>In Container Manager: <b>Project</b> → harbour-gateway → <b>Action → Stop</b>, then <b>Action → Clean</b>; <b>Image</b> → delete <code>ghcr.io/stompdonkeys/harbour-gateway</code>; back in <b>Project</b> → <b>Action → Build</b>. Your settings are kept.</div>`);
   if (!state.writable) b.push(`<div class="banner warn"><b>Settings can't be saved yet</b>The gateway can't write to its config folder. In your docker-compose use <code>./config:/config</code> (without <code>:ro</code>), and in File Station give your Docker user Read/Write on that folder.</div>`);
   $("banners").innerHTML = b.join("");
 }
