@@ -48,6 +48,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import au.matt.harbour.data.ActionDef
+import au.matt.harbour.data.Discussion
+import au.matt.harbour.data.discussion
 import au.matt.harbour.data.EpisodeInfo
 import au.matt.harbour.data.SeasonPage
 import au.matt.harbour.data.ServiceInfo
@@ -58,8 +60,9 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 /**
- * One season of a show, episode by episode: stills, stories, what you have, what you've watched,
- * and every per-episode action (play, auto/manual search, monitor, delete) on the right.
+ * One season of a show, episode by episode: stills, stories, what you have, what you've watched.
+ * OK on an episode opens its actions (play, search, monitor, delete, discussion); the panel on the
+ * right is just for reading — the still, the story, ratings and what people are saying on Trakt.
  */
 @Composable
 fun SeasonScreen(
@@ -131,7 +134,7 @@ private fun SeasonContent(
     var sel by remember(page.season.number) { mutableIntStateOf(startIdx) }
     val ep = eps.getOrNull(sel)
     val epFr = remember(page.season.number, eps.size) { List(eps.size) { FocusRequester() } }
-    val panelFr = remember { FocusRequester() }
+    var menuFor by remember { mutableStateOf<EpisodeInfo?>(null) }
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
     var grabbed by remember(page.season.number) { mutableStateOf(false) }
@@ -208,23 +211,24 @@ private fun SeasonContent(
                             selected = i == sel,
                             focusRequester = epFr[i],
                             onFocused = { sel = i },
-                            onClick = {
-                                if (e.actions.isNotEmpty()) runCatching { panelFr.requestFocus() }
-                            },
+                            onClick = { if (e.actions.isNotEmpty()) menuFor = e },
                         )
                     }
                 }
                 if (ep != null) {
-                    EpisodePanel(
-                        ep = ep,
-                        firstAction = panelFr,
-                        backTo = epFr.getOrNull(sel),
-                        onAction = onAction,
-                        modifier = Modifier.weight(1f).fillMaxHeight(),
-                    )
+                    EpisodePanel(ep = ep, modifier = Modifier.weight(1f).fillMaxHeight())
                 }
             }
         }
+    }
+    menuFor?.let { e ->
+        MenuDialog(
+            title = "${e.label} · ${e.title}",
+            subtitle = listOfNotNull(e.statusLabel.ifBlank { null }, e.airDate).joinToString("  ·  ").ifBlank { null },
+            items = e.actions.map { (if (it.opens == "play") "▶  " else "") + it.label to it.style },
+            onPick = { i -> menuFor = null; e.actions.getOrNull(i)?.let(onAction) },
+            onDismiss = { menuFor = null },
+        )
     }
 }
 
@@ -283,24 +287,25 @@ private fun EpisodeTile(
 private fun epColor(status: String) = if (status == "none") HColors.Muted else calStatusColor(status)
 
 @Composable
-private fun EpisodePanel(
-    ep: EpisodeInfo,
-    firstAction: FocusRequester,
-    backTo: FocusRequester?,
-    onAction: (ActionDef) -> Unit,
-    modifier: Modifier,
-) {
+private fun EpisodePanel(ep: EpisodeInfo, modifier: Modifier) {
     val gw = LocalGateway.current
+    // The episode's Trakt discussion (if the gateway offers one): score + the top comments.
+    val ref = ep.actions.firstOrNull { it.opens == "discuss" }?.arg
+    var talk by remember(ref) { mutableStateOf<Discussion?>(TalkCache[ref]) }
+    var talkErr by remember(ref) { mutableStateOf(false) }
+    LaunchedEffect(ref) {
+        if (ref == null || TalkCache.containsKey(ref)) return@LaunchedEffect
+        delay(450)   // don't fetch for every episode the focus passes on the way down
+        runCatching { gw.discussion(ref, "likes", 1) }
+            .onSuccess { TalkCache[ref] = it; talk = it }
+            .onFailure { talkErr = true }
+    }
+
     GlassPanel(modifier, shape = RoundedCornerShape(22.dp)) {
         Column(Modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Box(Modifier.fillMaxWidth().height(150.dp).clip(RoundedCornerShape(14.dp)).background(HColors.Surface)) {
+            Box(Modifier.fillMaxWidth().height(170.dp).clip(RoundedCornerShape(14.dp)).background(HColors.Surface)) {
                 AsyncImage(model = gw.hero(ep.still), contentDescription = null, contentScale = ContentScale.Crop,
                     modifier = Modifier.fillMaxSize())
-                ep.rating?.let {
-                    Text("★ $it", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = Color.White,
-                        modifier = Modifier.align(Alignment.TopEnd).padding(8.dp).clip(RoundedCornerShape(6.dp))
-                            .background(Color.Black.copy(alpha = 0.55f)).padding(horizontal = 6.dp, vertical = 2.dp))
-                }
             }
             Text("${ep.label} · ${ep.title}", fontSize = 18.sp, fontWeight = FontWeight.ExtraBold, maxLines = 1,
                 overflow = TextOverflow.Ellipsis)
@@ -313,27 +318,67 @@ private fun EpisodePanel(
                     fontSize = 12.sp, color = HColors.TextDim, maxLines = 1, overflow = TextOverflow.Ellipsis,
                 )
             }
-            Text(ep.overview ?: "No synopsis yet.", fontSize = 13.sp, lineHeight = 19.sp,
-                color = HColors.Text.copy(alpha = 0.85f), maxLines = 4, overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.weight(1f))
-            if (ep.actions.isNotEmpty()) {
-                LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    contentPadding = PaddingValues(vertical = 4.dp, horizontal = 2.dp)) {
-                    itemsIndexed(ep.actions, key = { i, a -> "$i:${a.id}" }) { i, a ->
-                        TvButton(
-                            a.label,
-                            { onAction(a) },
-                            modifier = Modifier.focusProperties { if (i == 0 && backTo != null) left = backTo },
-                            style = a.style,
-                            focusRequester = if (i == 0) firstAction else null,
-                            icon = if (a.opens == "play") Icons.Filled.PlayArrow else null,
-                        )
-                    }
+            Text(ep.overview ?: "No synopsis yet.", fontSize = 13.sp, lineHeight = 18.sp,
+                color = HColors.Text.copy(alpha = 0.85f), maxLines = 3, overflow = TextOverflow.Ellipsis)
+            // ratings
+            val t = talk
+            if (ep.rating != null || t?.rating != null) {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    ep.rating?.let { ScoreChip("TMDB", "★ $it") }
+                    t?.rating?.let { ScoreChip("Trakt", "$it%" + if (t.votes > 0) "  · ${t.votes} votes" else "") }
                 }
             }
+            // what people are saying
+            if (ref != null) {
+                Column(Modifier.weight(1f).fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text(
+                        when {
+                            t == null && !talkErr -> "COMMENTS"
+                            t == null -> "COMMENTS — COULDN'T LOAD"
+                            t.total == 0 -> "NO COMMENTS YET"
+                            else -> "TOP COMMENTS  ·  ${t.total}"
+                        },
+                        fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.2.sp, color = HColors.TextDim,
+                    )
+                    t?.comments?.take(3)?.forEach { c ->
+                        Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp)).background(HColors.GlassFill)
+                            .padding(horizontal = 10.dp, vertical = 6.dp)) {
+                            Text(
+                                c.user + (c.rating?.let { "  ★ $it/10" } ?: "") + "   ♥ ${c.likes}",
+                                fontSize = 11.sp, fontWeight = FontWeight.Bold, color = HColors.TextDim, maxLines = 1,
+                            )
+                            Text(if (c.spoiler) "⚠ Spoiler — open Discussion to read" else c.text, fontSize = 13.sp,
+                                lineHeight = 17.sp, maxLines = 2, overflow = TextOverflow.Ellipsis,
+                                color = if (c.spoiler) HColors.TextDim else HColors.Text)
+                        }
+                    }
+                    if (t != null && t.total > 0) {
+                        Text("OK on the episode → Discussion for all of them", fontSize = 11.sp, color = HColors.TextFaint)
+                    }
+                }
+            } else {
+                Spacer(Modifier.weight(1f))
+            }
+            Text("OK on an episode for Play, search, monitor and more", fontSize = 11.sp, color = HColors.TextFaint)
         }
     }
 }
+
+@Composable
+private fun ScoreChip(label: String, value: String) {
+    Row(
+        Modifier.clip(RoundedCornerShape(8.dp)).background(HColors.GlassFill).padding(horizontal = 9.dp, vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(label.uppercase(), fontSize = 10.sp, fontWeight = FontWeight.Bold, letterSpacing = 0.8.sp,
+            color = HColors.TextDim)
+        Spacer(Modifier.width(6.dp))
+        Text(value, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+    }
+}
+
+/** Trakt discussions already fetched this session, so moving up and down the list is instant. */
+private val TalkCache = mutableMapOf<String?, Discussion>()
 
 /**
  * Runs a page's actions the same way everywhere: menus, choices, confirmations, the busy
