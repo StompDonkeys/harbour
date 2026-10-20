@@ -1509,3 +1509,49 @@ def test_tautulli_activity(client, monkeypatch):
 def test_tautulli_off(client):
     assert client.get("/api/config", headers=H).get_json()["activity"] is False
     assert client.get("/api/activity", headers=H).status_code == 404
+
+
+@responses.activate
+def test_trakt_discussion(client, monkeypatch):
+    assert client.get("/api/config", headers=H).get_json()["discuss"] is False
+    monkeypatch.setitem(gw.CFG, "trakt", {"client_id": "cid"})
+    assert client.get("/api/config", headers=H).get_json()["discuss"] is True
+    gw._TRAKT_IDS.clear()
+
+    # A Radarr page gets a Discussion button pointing at its TMDB id.
+    movies = [movie(2, tmdbId=603)]
+    responses.get("http://nas:7878/api/v3/movie", json=movies)
+    responses.get("http://nas:7878/api/v3/movie/2", json=movies[0])
+    responses.get("http://nas:7878/api/v3/queue", json={"records": []})
+    d = client.get("/api/svc/radarr/radarr/item/2", headers=H).get_json()
+    disc = next(a for a in d["actions"] if a["id"] == "discuss")
+    assert disc["opens"] == "discuss" and disc["arg"] == "movie-603"
+
+    # Hub season pages: one per episode.
+    monkeypatch.setattr(gw.HUB, "season", lambda item_id, n: {"show": {"id": "tv-95396"}, "season": {"number": n},
+                                                             "episodes": [{"number": 1, "actions": []}, {"number": 2}]})
+    s = client.get("/api/svc/hub/hub/season/tv-95396/2", headers=H).get_json()
+    assert [a["arg"] for e in s["episodes"] for a in e["actions"] if a["id"] == "discuss"] == \
+        ["tv-95396|s2e1", "tv-95396|s2e2"]
+
+    def hdrs(req):
+        assert req.headers["trakt-api-key"] == "cid" and req.headers["trakt-api-version"] == "2"
+        return True
+    responses.get("https://api.trakt.tv/search/tmdb/95396", match=[lambda r: (hdrs(r), "")],
+                  json=[{"type": "show", "show": {"title": "Severance", "year": 2022, "ids": {"trakt": 1, "slug": "severance"}}}])
+    responses.get("https://api.trakt.tv/shows/severance/seasons/2/episodes/1/comments/likes",
+                  headers={"X-Pagination-Page-Count": "3", "X-Pagination-Item-Count": "61"},
+                  json=[{"id": 5, "comment": "What a [spoiler]twist[/spoiler]!", "spoiler": False, "review": False,
+                         "likes": 12, "replies": 2, "created_at": "2025-01-17T10:00:00Z",
+                         "user_stats": {"rating": 9}, "user": {"username": "mark_s", "name": "Mark S"}}])
+    responses.get("https://api.trakt.tv/shows/severance/seasons/2/episodes/1/ratings", json={"rating": 8.71, "votes": 900})
+    responses.get("https://api.trakt.tv/shows/severance/seasons/2/episodes/1", json={"title": "Hello, Ms. Cobel"})
+    r = client.get("/api/discuss?ref=" + quote("tv-95396|s2e1"), headers=H).get_json()
+    assert r["title"] == "Severance · S02E01" and r["episodeTitle"] == "Hello, Ms. Cobel"
+    assert r["rating"] == 87 and r["total"] == 61 and r["pages"] == 3
+    assert r["url"] == "https://trakt.tv/shows/severance/seasons/2/episodes/1"
+    c = r["comments"][0]
+    assert c["spoiler"] is True and c["text"] == "What a twist!" and c["user"] == "mark_s" and c["rating"] == 9
+
+    responses.get("https://api.trakt.tv/comments/5/replies", json=[{"id": 6, "comment": "Agreed", "user": {"username": "helly"}}])
+    assert client.get("/api/discuss/replies/5", headers=H).get_json()["comments"][0]["user"] == "helly"

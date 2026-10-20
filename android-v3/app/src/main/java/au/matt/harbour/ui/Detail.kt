@@ -122,11 +122,13 @@ fun DetailScreen(
     val afterChoice: (ActionDef, String?) -> Unit = { a, choice ->
         if (a.confirm != null) confirming = Pending(a, choice) else run(a, choice)
     }
+    val openDiscussion = LocalOpenDiscussion.current
     val trigger: (ActionDef) -> Unit = { a ->
         when {
             a.opens == "menu" && a.items.isNotEmpty() -> actionMenu = a
             a.opens == "trailer" && a.arg != null -> onTrailer(a.arg, detail?.item?.title ?: "Trailer")
             a.opens == "releases" -> onOpenReleases(a.arg, detail?.item?.title ?: "")
+            a.opens == "discuss" && a.arg != null -> openDiscussion(a.arg, detail?.item?.title ?: "")
             a.opens == "item" && a.arg != null -> onOpenItem(a.arg)
             a.opens == "youtube" && a.arg != null -> {
                 // A plain watch link works with YouTube *and* SmartTube; vnd.youtube: is the fallback.

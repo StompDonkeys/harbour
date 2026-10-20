@@ -101,11 +101,15 @@ SCHEMA = {
         {"key": "api_key", "label": "API key", "type": "secret", "required": True,
          "help": "Tautulli → Settings → Web Interface → API key"},
     ]},
+    "trakt": {"title": "Trakt", "single": True, "test": True, "optional": True, "fields": [
+        {"key": "client_id", "label": "Client ID", "type": "secret", "required": True,
+         "help": "trakt.tv → Settings → Your API Apps → New Application → Client ID. Adds episode and movie discussion."},
+    ]},
     "tmdb": {"title": "TMDB", "single": True, "optional": True, "fields": [
         {"key": "api_key", "label": "Read access token", "type": "secret", "help": "Optional — extra artwork and info"},
     ]},
 }
-ORDER = ["general", "radarr", "sonarr", "seerr", "nzbget", "qbittorrent", "newznab", "filestation", "plex", "tautulli", "prowlarr", "tmdb"]
+ORDER = ["general", "radarr", "sonarr", "seerr", "nzbget", "qbittorrent", "newznab", "filestation", "plex", "tautulli", "trakt", "prowlarr", "tmdb"]
 SECRET_KEYS = {s: {f["key"] for f in v["fields"] if f["type"] == "secret"} for s, v in SCHEMA.items()}
 
 

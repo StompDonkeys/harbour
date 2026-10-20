@@ -376,6 +376,7 @@ fun rememberActionRunner(
         }
     }
     val afterChoice: (ActionDef, String?) -> Unit = { a, c -> if (a.confirm != null) confirming = a to c else run(a, c) }
+    val openDiscussion = LocalOpenDiscussion.current
     lateinit var trigger: (ActionDef) -> Unit
     trigger = { a ->
         when {
@@ -383,6 +384,7 @@ fun rememberActionRunner(
             a.opens == "trailer" && a.arg != null -> onTrailer(a.arg, title())
             a.opens == "releases" -> onOpenReleases(a.arg, title())
             a.opens == "play" && a.arg != null -> onPlay(a.arg)
+            a.opens == "discuss" && a.arg != null -> openDiscussion(a.arg, title())
             a.choose != null && a.choose.options.size > 1 -> choosing = a
             else -> afterChoice(a, a.choose?.options?.firstOrNull()?.value)
         }

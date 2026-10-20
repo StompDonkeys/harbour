@@ -102,6 +102,7 @@ sealed interface Screen {
     data object Indexers : Screen
     data object Search : Screen
     data object Activity : Screen
+    data class Discussion(val ref: String, val title: String) : Screen
     data object Downloads : Screen
     data object Files : Screen
     data object Settings : Screen
@@ -343,7 +344,8 @@ private fun MainShell(config: GatewayConfig, settings: @Composable () -> Unit, u
     val inset by animateDpAsState(if (showRail) RailCollapsed else 0.dp, tween(280), label = "inset")
 
     CompositionLocalProvider(LocalBackdrop provides backdrop, LocalBackdropSink provides { backdrop = it },
-        LocalReselect provides reselect) {
+        LocalReselect provides reselect,
+        LocalOpenDiscussion provides { ref, t -> push(Screen.Discussion(ref, t)) }) {
         Box(Modifier.fillMaxSize().background(HColors.Bg)) {
             Box(
                 Modifier
@@ -461,6 +463,7 @@ private fun ScreenContent(
         )
         Screen.Downloads -> TopInset { DownloadsScreen() }
         Screen.Activity -> TopInset { ActivityScreen() }
+        is Screen.Discussion -> TopInset { DiscussionScreen(screen.ref, screen.title) }
         Screen.Files -> TopInset { FilesScreen(onPlay = { path -> play("file:$path") }) }
         Screen.Settings -> TopInset { settings() }
     }

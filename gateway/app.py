@@ -709,6 +709,7 @@ class Sonarr(Arr):
                                           arg=str(e["episodeFileId"])))
                 episodes.append(clean({
                     "id": eid,
+                    "number": e.get("episodeNumber", 0),
                     "label": f"E{e.get('episodeNumber', 0):02d}",
                     "title": e.get("title") or "TBA",
                     "subtitle": join(fmt_date(e.get("airDateUtc"), True) or "TBA", state,
@@ -3778,6 +3779,13 @@ def test_service(kind, c):
             r.raise_for_status()
             n = len((r.json().get("MediaContainer") or {}).get("Directory") or [])
             return {"ok": True, "message": f"Connected · {n} libraries ✓"}
+        if kind == "trakt":
+            r = requests.get("https://api.trakt.tv/movies/trending", params={"limit": 1},
+                             headers=Trakt(c).headers, timeout=10)
+            if r.status_code in (401, 403):
+                return {"ok": False, "message": "Trakt rejected that Client ID"}
+            r.raise_for_status()
+            return {"ok": True, "message": "Trakt answered ✓"}
         if kind == "tautulli":
             d = Tautulli(c).api("get_tautulli_info", timeout=8) or {}
             return {"ok": True, "message": f"Tautulli {d.get('tautulli_version', '')} ✓".replace("  ", " ")}
@@ -4214,6 +4222,7 @@ def config():
                    indexers=bool(CFG.get("prowlarr") or CFG.get("newznab")),
                    xdl=x_available(),
                    activity=bool((CFG.get("tautulli") or {}).get("api_key")),
+                   discuss=trakt_on(),
                    gatewayUpdate=gateway_update(),
                    repo=CFG.get("github_repo") or DEFAULT_REPO)
 
@@ -4339,7 +4348,12 @@ def svc_row(kind, inst):
 
 @app.get("/api/svc/<kind>/<inst>/item/<item_id>")
 def svc_detail(kind, inst, item_id):
-    return jsonify(svc(kind, inst).detail(item_id))
+    d = svc(kind, inst).detail(item_id)
+    if trakt_on() and isinstance(d, dict):
+        ref = safe(lambda: discuss_ref(kind, inst, item_id), "discussion link", None)
+        if ref:
+            add_discussion(d, ref)
+    return jsonify(d)
 
 
 @app.post("/api/svc/<kind>/<inst>/item/<item_id>/action")
@@ -4530,6 +4544,153 @@ def activity_img():
     return Response(r.content, mimetype=r.headers["Content-Type"], headers={"Cache-Control": "public, max-age=86400"})
 
 
+# ---------------------------------------------------------------- Trakt (discussion)
+#
+# Comments on movies, shows and single episodes from Trakt — the TV Time-style conversation.
+# Read-only, so only the app's Client ID is needed (no sign-in).
+
+class Trakt:
+    API = "https://api.trakt.tv"
+
+    def __init__(self, conf):
+        self.headers = {"Content-Type": "application/json", "trakt-api-version": "2",
+                        "trakt-api-key": (conf.get("client_id") or "").strip(),
+                        "User-Agent": f"Harbour/{VERSION}"}
+
+    def req(self, path, **params):
+        r = requests.get(self.API + path, params=params, headers=self.headers, timeout=15)
+        if r.status_code in (401, 403):
+            raise ApiError("Trakt rejected the Client ID — check it in Settings → Trakt", 502)
+        if r.status_code == 404:
+            raise ApiError("Trakt doesn't know this title", 404)
+        r.raise_for_status()
+        return r
+
+    def find(self, ref):
+        """'movie-603' / 'tv-1396' (TMDB ids) or 'show/tvdb/81189' → (type, trakt slug, title, year)."""
+        hit = _TRAKT_IDS.get(ref)
+        if hit:
+            return hit
+        m = re.fullmatch(r"(movie|tv)-(\d+)", ref)
+        if m:
+            typ, src, ident = ("movie" if m.group(1) == "movie" else "show"), "tmdb", m.group(2)
+        else:
+            m = re.fullmatch(r"(movie|show)/(tmdb|tvdb|imdb)/([\w]+)", ref)
+            if not m:
+                raise ApiError("Bad discussion link")
+            typ, src, ident = m.groups()
+        res = self.req(f"/search/{src}/{ident}", type=typ).json()
+        obj = next((x.get(typ) for x in res if x.get(typ)), None)
+        if not obj:
+            raise ApiError("Trakt doesn't know this title", 404)
+        hit = (typ, obj["ids"].get("slug") or obj["ids"]["trakt"], obj.get("title"), obj.get("year"))
+        _TRAKT_IDS[ref] = hit
+        return hit
+
+    @staticmethod
+    def _comment(c):
+        text = c.get("comment") or ""
+        spoiler = bool(c.get("spoiler")) or "[spoiler]" in text.lower()
+        text = re.sub(r"\[/?spoiler\]", "", text, flags=re.I).strip()
+        u = c.get("user") or {}
+        return clean({"id": c.get("id"), "user": u.get("username") or u.get("name") or "someone",
+                      "name": u.get("name") if u.get("name") and u.get("name") != u.get("username") else None,
+                      "text": text, "spoiler": spoiler, "review": bool(c.get("review")),
+                      "likes": c.get("likes") or 0, "replies": c.get("replies") or 0,
+                      "rating": (c.get("user_stats") or {}).get("rating"),
+                      "created": c.get("created_at")})
+
+    def discussion(self, ref, season=None, episode=None, sort="likes", page=1):
+        typ, slug, title, year = self.find(ref)
+        base = f"/{typ}s/{slug}"
+        web = f"https://trakt.tv/{typ}s/{slug}"
+        label = f"{title} ({year})" if year and typ == "movie" else title
+        ep_title = None
+        if typ == "show" and season is not None and episode is not None:
+            base += f"/seasons/{int(season)}/episodes/{int(episode)}"
+            web += f"/seasons/{int(season)}/episodes/{int(episode)}"
+            label = f"{title} · S{int(season):02d}E{int(episode):02d}"
+        sort = sort if sort in ("likes", "newest", "replies", "highest", "lowest", "oldest") else "likes"
+        got = par(comments=lambda: self.req(f"{base}/comments/{sort}", page=max(1, int(page)), limit=25),
+                  ratings=lambda: safe(lambda: self.req(f"{base}/ratings").json(), "trakt ratings", {}),
+                  ep=lambda: safe(lambda: self.req(base).json(), "trakt episode", {})
+                  if base.count("/episodes/") else {})
+        r = got["comments"]
+        ep_title = (got["ep"] or {}).get("title")
+        rating = got["ratings"] or {}
+        return {"title": label, "episodeTitle": ep_title, "url": web, "sort": sort,
+                "rating": round(rating["rating"] * 10) if rating.get("rating") else None,
+                "votes": rating.get("votes") or 0,
+                "page": int(r.headers.get("X-Pagination-Page") or page),
+                "pages": int(r.headers.get("X-Pagination-Page-Count") or 1),
+                "total": int(r.headers.get("X-Pagination-Item-Count") or 0),
+                "comments": [self._comment(c) for c in r.json() or []]}
+
+    def replies(self, cid):
+        return {"comments": [self._comment(c) for c in self.req(f"/comments/{int(cid)}/replies", limit=100).json() or []]}
+
+
+_TRAKT_IDS = {}
+
+
+def trakt_on():
+    return bool((CFG.get("trakt") or {}).get("client_id"))
+
+
+def trakt():
+    if not trakt_on():
+        raise ApiError("Trakt isn't set up — add its Client ID in the phone app: Settings → Trakt", 404)
+    return Trakt(CFG["trakt"])
+
+
+def discuss_ref(kind, inst, item_id):
+    """Which title on Trakt a detail page is about: 'movie-<tmdb>', 'tv-<tmdb>' or 'show/tvdb/<id>'."""
+    s = svc(kind, inst)
+    if isinstance(s, (Hub, Seerr)) or kind in ("hub", "seerr"):
+        return item_id if re.fullmatch(r"(movie|tv)-\d+", item_id) else None
+    if kind == "lib":
+        parts = item_id.split("~", 2)
+        if len(parts) == 3:
+            return discuss_ref(parts[0], parts[1], parts[2])
+        return item_id if re.fullmatch(r"(movie|tv)-\d+", item_id) else None
+    if kind == "radarr":
+        m = next((x for x in s.movies() if str(x.get("id")) == str(item_id)), None)
+        return f"movie-{m['tmdbId']}" if m and m.get("tmdbId") else None
+    if kind == "sonarr":
+        x = next((x for x in s.series() if str(x.get("id")) == str(item_id)), None)
+        if not x:
+            return None
+        return f"tv-{x['tmdbId']}" if x.get("tmdbId") else f"show/tvdb/{x['tvdbId']}" if x.get("tvdbId") else None
+    return None
+
+
+def add_discussion(d, ref):
+    """A Discussion button on the page, and on every episode of a Sonarr page."""
+    d.setdefault("actions", []).append(action("discuss", "Discussion", opens="discuss", arg=ref))
+    if ref.startswith(("tv-", "show/")):
+        for sn in d.get("seasons") or []:
+            for ep in sn.get("episodes") or []:
+                if ep.get("number") is not None and sn.get("number") is not None:
+                    ep.setdefault("actions", []).append(
+                        action("discuss", "Discussion", opens="discuss", arg=f"{ref}|s{sn['number']}e{ep['number']}"))
+
+
+@app.get("/api/discuss")
+def discuss_route():
+    a = request.args
+    ref = a.get("ref", "")
+    season, episode = a.get("season"), a.get("episode")
+    m = re.fullmatch(r"(.+)\|s(\d+)e(\d+)", ref)
+    if m:
+        ref, season, episode = m.groups()
+    return jsonify(trakt().discussion(ref, season, episode, a.get("sort") or "likes", a.get("page") or 1))
+
+
+@app.get("/api/discuss/replies/<int:cid>")
+def discuss_replies(cid):
+    return jsonify(trakt().replies(cid))
+
+
 def files():
     if not FILES:
         raise ApiError("File Station isn't configured", 404)
@@ -4589,7 +4750,14 @@ def svc_season(kind, inst, item_id, n):
     s = svc(kind, inst)
     if not hasattr(s, "season"):
         raise ApiError("Season pages aren't available here")
-    return jsonify(s.season(item_id, n))
+    page = s.season(item_id, n)
+    ref = ((page.get("show") or {}).get("id") or "") if isinstance(page, dict) else ""
+    if trakt_on() and re.fullmatch(r"tv-\d+", ref):
+        for ep in page.get("episodes") or []:
+            if ep.get("number") is not None:
+                ep.setdefault("actions", []).append(
+                    action("discuss", "Discussion", opens="discuss", arg=f"{ref}|s{n}e{ep['number']}"))
+    return jsonify(page)
 
 
 @app.get("/api/trailer/<key>")

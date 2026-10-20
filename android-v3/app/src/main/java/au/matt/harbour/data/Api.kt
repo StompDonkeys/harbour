@@ -49,6 +49,8 @@ data class GatewayConfig(
     val indexers: Boolean = false,
     /** Tautulli is set up: Plex activity (now playing, history, top). */
     val activity: Boolean = false,
+    /** Trakt is set up: Discussion on title and episode pages. */
+    val discuss: Boolean = false,
     /** A newer gateway image is published (version), if any. */
     val gatewayUpdate: String? = null,
     val repo: String = "StompDonkeys/harbour",
@@ -730,3 +732,40 @@ suspend fun Gateway.activityHistory(start: Int, user: Long?): ActHistory =
 suspend fun Gateway.activityStats(days: Int): ActStats = get("/api/activity/stats?days=$days")
 
 suspend fun Gateway.activityUsers(): ActUsers = get("/api/activity/users")
+
+
+// ---------------------------------------------------------------- Discussion (Trakt)
+
+@Serializable
+data class Comment(
+    val id: Long = 0,
+    val user: String = "",
+    val text: String = "",
+    val spoiler: Boolean = false,
+    val review: Boolean = false,
+    val likes: Int = 0,
+    val replies: Int = 0,
+    val rating: Int? = null,
+    val created: String? = null,
+)
+
+@Serializable
+data class Discussion(
+    val title: String = "",
+    val episodeTitle: String? = null,
+    val url: String? = null,
+    val rating: Int? = null,
+    val votes: Int = 0,
+    val page: Int = 1,
+    val pages: Int = 1,
+    val total: Int = 0,
+    val comments: List<Comment> = emptyList(),
+)
+
+@Serializable
+data class Replies(val comments: List<Comment> = emptyList())
+
+suspend fun Gateway.discussion(ref: String, sort: String, page: Int): Discussion =
+    get("/api/discuss?ref=${Gateway.enc(ref)}&sort=$sort&page=$page")
+
+suspend fun Gateway.discussionReplies(id: Long): Replies = get("/api/discuss/replies/$id")

@@ -284,6 +284,17 @@ button.cell:active, .cell.tap:active { background: var(--cell-2); }
 .act-chip.tx { background: rgba(255,149,0,.18); color: #ff9500; }
 .act-chip.dp { background: rgba(52,199,89,.16); color: var(--green); }
 .act-rank { width: 22px; flex: none; text-align: center; font-weight: 700; color: var(--label-3); font-size: 15px; }
+.cmt { padding: 12px 16px; border-bottom: .5px solid var(--sep); }
+.cmt:last-child { border-bottom: 0; }
+.cmt .who { display: flex; align-items: baseline; gap: 6px; font-size: 14px; }
+.cmt .who b { font-weight: 600; }
+.cmt .who span { color: var(--label-2); font-size: 13px; }
+.cmt .txt { font-size: 15px; line-height: 1.4; margin-top: 4px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.cmt .spoil { margin-top: 6px; padding: 10px 12px; border-radius: 10px; background: var(--fill); color: var(--label-2); font-size: 14px; width: 100%; text-align: left; }
+.cmt .foot { display: flex; gap: 14px; margin-top: 6px; font-size: 13px; color: var(--label-2); }
+.cmt .foot button { color: var(--tint); font-size: 13px; }
+.cmt .reps { margin: 8px 0 0 12px; padding-left: 10px; border-left: 2px solid var(--fill); }
+.cmt .reps .cmt { padding: 8px 0; border-bottom: 0; }
 .prog { height: 4px; border-radius: 2px; background: var(--fill); margin-top: 7px; overflow: hidden; }
 .prog i { display: block; height: 100%; background: var(--tint); border-radius: 2px; transition: width .6s; }
 .prog.paused i { background: var(--label-3); }
@@ -1161,6 +1172,7 @@ async function runAction(svc, itemId, a, item, after, btn) {
     push(DetailScreen(target, rest.join("/"), { title: item.title, poster: item.poster, backdrop: item.backdrop }));
     return;
   }
+  if (a.opens === "discuss" && a.arg) { push(DiscussScreen(a.arg, item.title)); return; }
   if (a.opens === "play" || a.opens === "plex") { toast("Playing from Plex is on the TV app for now"); return; }
   if (a.opens) { toast("That one's on the TV app for now"); return; }
   let choice = null;
@@ -1218,6 +1230,63 @@ function SeasonScreen(svc, itemId, season, showTitle, after) {
   }
   p.body.append(...kids);
   return { el: p.el, title: season.label };
+}
+
+// ------------------------------------------------------------------ discussion (Trakt)
+/** Comments about a movie, show or one episode, from Trakt. Spoilers stay hidden until tapped. */
+function DiscussScreen(ref, title) {
+  const p = page({ title: "Discussion", back: prevTitle() });
+  let sort = "likes", pageNo = 1, pages = 1, data = null, list = [];
+  const head = h("div", {}), box = h("div", {}), more = h("div", {});
+  const seg = h("div", { class: "seg", style: "margin:4px 16px 14px" });
+  const drawSeg = () => seg.replaceChildren(...[["likes", "Most liked"], ["newest", "Newest"], ["replies", "Most replies"]].map(([k, l]) =>
+    h("button", { class: k === sort ? "on" : "", onclick: () => { if (sort !== k) { sort = k; drawSeg(); load(); } } }, l)));
+  drawSeg();
+  p.body.append(head, seg, box, more);
+
+  function comment(c, nested) {
+    const txt = h("div", { class: "txt" }, c.text);
+    const body = c.spoiler ? h("button", { class: "spoil", onclick: e => e.currentTarget.replaceWith(txt) }, "⚠️ Spoiler — tap to read") : txt;
+    const reps = h("div", {});
+    const foot = !nested && h("div", { class: "foot" },
+      h("span", {}, `♥ ${c.likes || 0}`),
+      c.replies ? h("button", { onclick: e => showReplies(c, reps, e.currentTarget) }, `${c.replies} repl${c.replies === 1 ? "y" : "ies"}`) : null,
+      c.review ? h("span", {}, "Review") : null);
+    return h("div", { class: "cmt" },
+      h("div", { class: "who" }, h("b", {}, c.user), c.rating ? h("span", {}, `★ ${c.rating}/10`) : null,
+        h("span", { style: "margin-left:auto" }, c.created ? ago(Date.parse(c.created) / 1000) : "")),
+      body, foot, reps);
+  }
+  async function showReplies(c, holder, btn) {
+    if (holder.firstChild) { holder.replaceChildren(); return; }
+    btn.disabled = true;
+    try {
+      const r = await get(`/api/discuss/replies/${c.id}`);
+      holder.replaceChildren(h("div", { class: "reps" }, (r.comments || []).map(x => comment(x, true))));
+    } catch (e) { errToast(e); } finally { btn.disabled = false; }
+  }
+  function draw() {
+    head.replaceChildren(h("div", { style: "padding:14px 16px 8px" },
+      h("div", { style: "font-size:22px;font-weight:700;line-height:1.2" }, data.title || title || ""),
+      data.episodeTitle && h("div", { style: "font-size:15px;color:var(--label-2);margin-top:2px" }, data.episodeTitle),
+      h("div", { style: "font-size:13px;color:var(--label-2);margin-top:6px" },
+        [data.rating != null ? `${data.rating}% on Trakt · ${data.votes} votes` : "", `${data.total} comment${data.total === 1 ? "" : "s"}`].filter(Boolean).join(" · "))));
+    box.replaceChildren(list.length ? h("div", { class: "section" }, h("div", { class: "group" }, list.map(c => comment(c))))
+      : emptyState("No comments yet", "Be the first on Trakt."));
+    more.replaceChildren(h("div", { class: "section" }, h("div", { class: "group" },
+      pageNo < pages && h("button", { class: "cell tint center", onclick: e => { e.currentTarget.disabled = true; load(true); } }, "Load more"),
+      h("a", { class: "cell tint center", href: data.url, target: "_blank", rel: "noopener", style: "text-decoration:none" }, "Open on Trakt"))));
+  }
+  async function load(next) {
+    if (!next) { pageNo = 1; list = []; box.replaceChildren(spinner()); more.replaceChildren(); }
+    try {
+      const r = await get(`/api/discuss?ref=${enc(ref)}&sort=${sort}&page=${next ? pageNo + 1 : 1}`);
+      data = r; pageNo = r.page; pages = r.pages; list = list.concat(r.comments || []);
+      draw();
+    } catch (e) { box.replaceChildren(errorState(e, () => load())); }
+  }
+  load();
+  return { el: p.el, title: "Discussion" };
 }
 
 // ------------------------------------------------------------------ trailers
@@ -1735,7 +1804,7 @@ function pickFolder(title, srcPath, okLabel) {
 const SECTION_STYLE = {
   general: ["#8e8e93", "gear"], radarr: ["#f5b100", "film"], sonarr: ["#2f8fe5", "tv"], seerr: ["#7c5cff", "compass"],
   nzbget: ["#34c759", "down"], qbittorrent: ["#2f6fdb", "down"], filestation: ["#1ea1f2", "drive"], plex: ["#e5a00d", "film"],
-  tmdb: ["#0dbd8b", "film"], tautulli: ["#e5a00d", "play"],
+  tmdb: ["#0dbd8b", "film"], tautulli: ["#e5a00d", "play"], trakt: ["#ed1c24", "tv"],
 };
 function sectionIcon(sec) {
   const [bg, ic] = SECTION_STYLE[sec] || ["#8e8e93", "gear"];
