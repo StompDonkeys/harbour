@@ -216,7 +216,8 @@ private fun SeasonContent(
                     }
                 }
                 if (ep != null) {
-                    EpisodePanel(ep = ep, modifier = Modifier.weight(1f).fillMaxHeight())
+                    EpisodePanel(ep = ep, backTo = epFr.getOrNull(sel), onAction = onAction,
+                        modifier = Modifier.weight(1f).fillMaxHeight())
                 }
             }
         }
@@ -287,12 +288,14 @@ private fun EpisodeTile(
 private fun epColor(status: String) = if (status == "none") HColors.Muted else calStatusColor(status)
 
 @Composable
-private fun EpisodePanel(ep: EpisodeInfo, modifier: Modifier) {
+private fun EpisodePanel(ep: EpisodeInfo, backTo: FocusRequester?, onAction: (ActionDef) -> Unit, modifier: Modifier) {
     val gw = LocalGateway.current
     // The episode's Trakt discussion (if the gateway offers one): score + the top comments.
-    val ref = ep.actions.firstOrNull { it.opens == "discuss" }?.arg
+    val discuss = ep.actions.firstOrNull { it.opens == "discuss" }
+    val ref = discuss?.arg
     var talk by remember(ref) { mutableStateOf<Discussion?>(TalkCache[ref]) }
     var talkErr by remember(ref) { mutableStateOf(false) }
+    val revealed = remember(ref) { mutableStateMapOf<Long, Boolean>() }
     LaunchedEffect(ref) {
         if (ref == null || TalkCache.containsKey(ref)) return@LaunchedEffect
         delay(450)   // don't fetch for every episode the focus passes on the way down
@@ -300,66 +303,105 @@ private fun EpisodePanel(ep: EpisodeInfo, modifier: Modifier) {
             .onSuccess { TalkCache[ref] = it; talk = it }
             .onFailure { talkErr = true }
     }
+    // Right from an episode comes in here; Left goes back to that episode.
+    val back = Modifier.focusProperties { if (backTo != null) left = backTo }
+    val panelList = rememberLazyListState()
+    LaunchedEffect(ep.key) { panelList.scrollToItem(0) }
 
     GlassPanel(modifier, shape = RoundedCornerShape(22.dp)) {
-        Column(Modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Box(Modifier.fillMaxWidth().height(170.dp).clip(RoundedCornerShape(14.dp)).background(HColors.Surface)) {
-                AsyncImage(model = gw.hero(ep.still), contentDescription = null, contentScale = ContentScale.Crop,
-                    modifier = Modifier.fillMaxSize())
-            }
-            Text("${ep.label} · ${ep.title}", fontSize = 18.sp, fontWeight = FontWeight.ExtraBold, maxLines = 1,
-                overflow = TextOverflow.Ellipsis)
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Box(Modifier.size(8.dp).clip(CircleShape).background(epColor(ep.status)))
-                Spacer(Modifier.width(7.dp))
-                Text(
-                    listOfNotNull(ep.statusLabel.ifBlank { null }, ep.airDate, ep.runtime,
-                        if (ep.watched) "Watched" else null).joinToString("  ·  "),
-                    fontSize = 12.sp, color = HColors.TextDim, maxLines = 1, overflow = TextOverflow.Ellipsis,
-                )
-            }
-            Text(ep.overview ?: "No synopsis yet.", fontSize = 13.sp, lineHeight = 18.sp,
-                color = HColors.Text.copy(alpha = 0.85f), maxLines = 3, overflow = TextOverflow.Ellipsis)
-            // ratings
-            val t = talk
-            if (ep.rating != null || t?.rating != null) {
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                    ep.rating?.let { ScoreChip("TMDB", "★ $it") }
-                    t?.rating?.let { ScoreChip("Trakt", "$it%" + if (t.votes > 0) "  · ${t.votes} votes" else "") }
+        ScrollRules(auto = true) {
+            LazyColumn(
+                state = panelList,
+                modifier = Modifier.fillMaxSize(),
+                contentPadding = PaddingValues(16.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                item(key = "still") {
+                    Box(Modifier.fillMaxWidth().height(170.dp).clip(RoundedCornerShape(14.dp)).background(HColors.Surface)) {
+                        AsyncImage(model = gw.hero(ep.still), contentDescription = null, contentScale = ContentScale.Crop,
+                            modifier = Modifier.fillMaxSize())
+                    }
                 }
-            }
-            // what people are saying
-            if (ref != null) {
-                Column(Modifier.weight(1f).fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Text(
-                        when {
-                            t == null && !talkErr -> "COMMENTS"
-                            t == null -> "COMMENTS — COULDN'T LOAD"
-                            t.total == 0 -> "NO COMMENTS YET"
-                            else -> "TOP COMMENTS  ·  ${t.total}"
-                        },
-                        fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.2.sp, color = HColors.TextDim,
-                    )
-                    t?.comments?.take(3)?.forEach { c ->
-                        Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp)).background(HColors.GlassFill)
-                            .padding(horizontal = 10.dp, vertical = 6.dp)) {
+                item(key = "head") {
+                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Text("${ep.label} · ${ep.title}", fontSize = 18.sp, fontWeight = FontWeight.ExtraBold, maxLines = 1,
+                            overflow = TextOverflow.Ellipsis)
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Box(Modifier.size(8.dp).clip(CircleShape).background(epColor(ep.status)))
+                            Spacer(Modifier.width(7.dp))
                             Text(
-                                c.user + (c.rating?.let { "  ★ $it/10" } ?: "") + "   ♥ ${c.likes}",
-                                fontSize = 11.sp, fontWeight = FontWeight.Bold, color = HColors.TextDim, maxLines = 1,
+                                listOfNotNull(ep.statusLabel.ifBlank { null }, ep.airDate, ep.runtime,
+                                    if (ep.watched) "Watched" else null).joinToString("  ·  "),
+                                fontSize = 12.sp, color = HColors.TextDim, maxLines = 1, overflow = TextOverflow.Ellipsis,
                             )
-                            Text(if (c.spoiler) "⚠ Spoiler — open Discussion to read" else c.text, fontSize = 13.sp,
-                                lineHeight = 17.sp, maxLines = 2, overflow = TextOverflow.Ellipsis,
-                                color = if (c.spoiler) HColors.TextDim else HColors.Text)
                         }
                     }
-                    if (t != null && t.total > 0) {
-                        Text("OK on the episode → Discussion for all of them", fontSize = 11.sp, color = HColors.TextFaint)
+                }
+                // The story: focusable so you can move here and read all of it.
+                item(key = "story") {
+                    FocusBox(onClick = {}, modifier = back.fillMaxWidth(), focusedScale = 1f, borderWidth = 0.dp,
+                        shape = RoundedCornerShape(10.dp)) { f ->
+                        Text(ep.overview ?: "No synopsis yet.", fontSize = 14.sp, lineHeight = 20.sp,
+                            color = HColors.Text.copy(alpha = if (f) 1f else 0.85f),
+                            maxLines = if (f) 40 else 3, overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.fillMaxWidth().background(if (f) HColors.GlassFill else Color.Transparent)
+                                .padding(horizontal = 6.dp, vertical = 4.dp))
                     }
                 }
-            } else {
-                Spacer(Modifier.weight(1f))
+                val t = talk
+                if (ep.rating != null || t?.rating != null) {
+                    item(key = "scores") {
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                            ep.rating?.let { ScoreChip("TMDB", "★ $it") }
+                            t?.rating?.let { ScoreChip("Trakt", "$it%" + if (t.votes > 0) "  · ${t.votes} votes" else "") }
+                        }
+                    }
+                }
+                if (ref != null) {
+                    item(key = "talk-head") {
+                        Text(
+                            when {
+                                t == null && !talkErr -> "COMMENTS  ·  LOADING…"
+                                t == null -> "COMMENTS — COULDN'T LOAD"
+                                t.total == 0 -> "NO COMMENTS YET"
+                                else -> "TOP COMMENTS  ·  ${t.total}"
+                            },
+                            fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.2.sp, color = HColors.TextDim,
+                            modifier = Modifier.padding(top = 6.dp),
+                        )
+                    }
+                    itemsIndexed(t?.comments.orEmpty().take(10), key = { _, c -> "c${c.id}" }) { _, c ->
+                        val open = !c.spoiler || revealed[c.id] == true
+                        FocusBox(
+                            onClick = { if (!open) revealed[c.id] = true else discuss?.let(onAction) },
+                            modifier = back.fillMaxWidth(), focusedScale = 1.01f, borderWidth = 0.dp,
+                            shape = RoundedCornerShape(10.dp),
+                        ) { f ->
+                            Column(Modifier.fillMaxWidth().background(if (f) HColors.GlassStrong else HColors.GlassFill)
+                                .padding(horizontal = 10.dp, vertical = 7.dp)) {
+                                Text(
+                                    c.user + (c.rating?.let { "  ★ $it/10" } ?: "") + "   ♥ ${c.likes}" +
+                                        if (c.replies > 0) "   ${c.replies} repl${if (c.replies == 1) "y" else "ies"}" else "",
+                                    fontSize = 11.sp, fontWeight = FontWeight.Bold, color = HColors.TextDim, maxLines = 1,
+                                )
+                                Text(if (open) c.text else "⚠ Spoiler — press OK to read", fontSize = 13.sp,
+                                    lineHeight = 18.sp, maxLines = if (f) 20 else 3, overflow = TextOverflow.Ellipsis,
+                                    color = if (open) HColors.Text else HColors.TextDim)
+                            }
+                        }
+                    }
+                    if (t != null && discuss != null) {
+                        item(key = "all") {
+                            TvButton(if (t.total > 0) "All ${t.total} comments" else "Open discussion",
+                                { onAction(discuss) }, modifier = back)
+                        }
+                    }
+                }
+                item(key = "hint") {
+                    Text("OK on an episode: play, search, monitor and more", fontSize = 11.sp, color = HColors.TextFaint,
+                        modifier = Modifier.padding(top = 4.dp))
+                }
             }
-            Text("OK on an episode for Play, search, monitor and more", fontSize = 11.sp, color = HColors.TextFaint)
         }
     }
 }
