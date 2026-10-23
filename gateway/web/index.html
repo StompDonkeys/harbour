@@ -117,6 +117,23 @@ html.wide .tab:not(.split) .brand { max-width: 760px; margin-left: auto; margin-
 #tabbar button svg { width: 26px; height: 26px; }
 #tabbar button.on { color: var(--tint); }
 
+/* The Duo folded (cover screen): the status bar lives in a column down the right side. Like the
+   Duo's own apps, the tabs move into that column as round buttons under the status icons, and the
+   big page titles scroll away with the page instead of turning into a bar. */
+html.rail { --tabbar: var(--bottom); }
+html.rail #tabbar { left: auto; right: 0; bottom: auto; top: clamp(150px, 25vh, 270px); height: auto;
+  width: env(safe-area-inset-right, 80px); padding: 0; flex-direction: column; align-items: center; gap: 12px;
+  background: none; box-shadow: none; -webkit-backdrop-filter: none; backdrop-filter: none; }
+html.rail #tabbar button { flex: none; width: 60px; height: 60px; border-radius: 50%; font-size: 0; gap: 0; padding: 0;
+  background: var(--bar); -webkit-backdrop-filter: saturate(180%) blur(20px); backdrop-filter: saturate(180%) blur(20px);
+  box-shadow: 0 0 0 .5px var(--sep), 0 2px 8px rgba(0,0,0,.08); color: var(--label); }
+html.rail #tabbar button svg { width: 27px; height: 27px; }
+html.rail #tabbar button.on { background: var(--tint); color: #fff; box-shadow: 0 3px 10px rgba(0,122,255,.35); }
+html.rail .navbar.big { position: relative; }
+html.rail .navbar.big.solid { background: transparent; box-shadow: none; -webkit-backdrop-filter: none; backdrop-filter: none; }
+html.rail .navbar.big .title { opacity: 0 !important; }
+html.rail #toast { top: calc(var(--top) + 10px); }
+
 /* ---------------------------------------------------------------- grouped lists */
 .section { margin: 0 16px 35px; }
 .section-head { font-size: 13px; text-transform: uppercase; color: var(--label-2); padding: 0 16px 7px; letter-spacing: -.08px; }
@@ -632,10 +649,16 @@ function foldGeometry() {
     delete document.documentElement.dataset.fold;
   }
 }
+// The Duo folded puts its status bar in a wide column on the right (a big right safe area).
+const railProbe = document.createElement("div");
+railProbe.style.cssText = "position:fixed;visibility:hidden;pointer-events:none;padding-right:env(safe-area-inset-right,0px)";
+document.documentElement.append(railProbe);
 function applyLayout() {
   foldGeometry();
   const wide = WIDE.matches;
   document.documentElement.classList.toggle("wide", wide);
+  const sideInset = parseFloat(getComputedStyle(railProbe).paddingRight) || 0;
+  document.documentElement.classList.toggle("rail", !wide && sideInset >= 48 && innerHeight > innerWidth);
   for (const t of Object.values(S.tabs)) {
     t.el.classList.toggle("split", wide && !!t.def.split);
     t.el.classList.toggle("solo", t.stack.length < 2);
@@ -773,7 +796,7 @@ function attachSwipeBack(screen) {
 /** Standard page scaffolding: nav bar (+ large title on root screens) and a body to fill. */
 function page({ title, large, back, right = [], plain, overHero }) {
   const titleEl = h("div", { class: "title" }, title || "");
-  const nav = h("div", { class: "navbar" + (large || overHero ? "" : " always") + (overHero ? " over-hero" : "") },
+  const nav = h("div", { class: "navbar" + (large || overHero ? "" : " always") + (overHero ? " over-hero" : "") + (large ? " big" : "") },
     h("div", { class: "left" }, back && h("button", { class: "navbtn back", onclick: () => pop() }, svg("back"), back)),
     titleEl,
     h("div", { class: "right" }, right));
