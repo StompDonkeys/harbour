@@ -615,7 +615,9 @@ const seerrService = () => (S.config?.services || []).find(s => s.kind === "seer
    On a wide screen — the Duo opened, landscape phones, iPads — tabs with a list and details show
    both side by side: the list on the left, what you opened on the right, split at the fold.
    Folding/unfolding just re-lays out the same screens, so you stay exactly where you were. */
-const WIDE = matchMedia("(min-width: 600px)");
+// Side by side only when the screen is wider than tall: the Duo opened and held sideways, a phone in
+// landscape, an iPad in landscape. Opened in portrait it is one comfortable full-width column.
+const WIDE = matchMedia("(min-width: 600px) and (orientation: landscape)");
 function foldGeometry() {
   // Viewport Segments API (foldables): two side-by-side segments → split exactly at the hinge.
   const segs = window.viewport && window.viewport.segments;
