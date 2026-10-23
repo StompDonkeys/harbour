@@ -1615,3 +1615,15 @@ def test_komga_comics(client, monkeypatch):
     responses.get(f"{K}/books/B2XXXXX/thumbnail", body=b"png", content_type="image/png")
     assert client.get("/api/comics/img/book/B2XXXXX", headers=H).data == b"png"
     assert client.get("/api/comics/page/..%2Fx/1", headers=H).status_code in (400, 404)
+
+
+@responses.activate
+def test_file_stream_range_fallback(client):
+    """If File Station ignores Range, the gateway still answers 206 with just the requested bytes."""
+    responses.add(responses.POST, "http://nas:5000/webapi/auth.cgi", json={"success": True, "data": {"sid": "S1"}})
+    responses.add(responses.GET, "http://nas:5000/webapi/entry.cgi", body=b"0123456789",
+                  headers={"Content-Type": "video/mp4", "Content-Length": "10"})
+    r = client.get("/api/files/stream?path=" + quote("/video/a.mp4"), headers={**H, "Range": "bytes=3-6"})
+    assert r.status_code == 206 and r.data == b"3456" and r.headers["Content-Range"] == "bytes 3-6/10"
+    r = client.get("/api/files/stream?path=" + quote("/video/a.mp4"), headers={**H, "Range": "bytes=8-"})
+    assert r.data == b"89" and r.headers["Content-Length"] == "2"

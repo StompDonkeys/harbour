@@ -4894,13 +4894,40 @@ MEDIA_TYPES = {".mp4": "video/mp4", ".m4v": "video/mp4", ".mkv": "video/x-matros
 def files_stream():
     """Stream a video/audio file from the NAS (the TV player seeks with Range requests)."""
     path = request.args.get("path", "")
-    r = files().stream(path, request.headers.get("Range"))
+    rng = request.headers.get("Range")
+    r = files().stream(path, rng)
     headers = {"Accept-Ranges": "bytes"}
     for h in ("Content-Length", "Content-Range"):
         if r.headers.get(h):
             headers[h] = r.headers[h]
     ext = posixpath.splitext(path)[1].lower()
     mime = MEDIA_TYPES.get(ext) or r.headers.get("Content-Type") or "application/octet-stream"
+    m = re.fullmatch(r"bytes=(\d+)-(\d*)", (rng or "").strip())
+    total = int(r.headers.get("Content-Length") or 0)
+    if m and r.status_code == 200 and total:
+        # File Station ignored the Range. Safari (iPhone) won't play video without proper partial
+        # responses, so cut the requested slice out of the full stream ourselves.
+        start = int(m.group(1))
+        end = min(int(m.group(2)) if m.group(2) else total - 1, total - 1)
+        if start >= total:
+            r.close()
+            return Response(status=416, headers={"Content-Range": f"bytes */{total}"})
+
+        def sliced():
+            pos = 0
+            try:
+                for chunk in r.iter_content(256 * 1024):
+                    nxt = pos + len(chunk)
+                    if nxt > start:
+                        yield chunk[max(0, start - pos): end + 1 - pos]
+                    pos = nxt
+                    if pos > end:
+                        break
+            finally:
+                r.close()
+        headers.update({"Content-Range": f"bytes {start}-{end}/{total}", "Content-Length": str(end - start + 1)})
+        return Response(stream_with_context(sliced()), status=206, mimetype=mime, headers=headers,
+                        direct_passthrough=True)
     return Response(stream_with_context(r.iter_content(256 * 1024)), status=r.status_code,
                     mimetype=mime, headers=headers, direct_passthrough=True)
 

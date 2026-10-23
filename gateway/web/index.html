@@ -1664,6 +1664,34 @@ function DiscussScreen(ref, title) {
 }
 
 // ------------------------------------------------------------------ trailers
+// ------------------------------------------------------------------ playing files from the NAS
+const MEDIA_RE = /\.(mp4|m4v|mov|mkv|webm|avi|ts|m2ts|wmv|mpg|mpeg|mp3|m4a|aac|flac|wav|ogg|opus)$/i;
+// What Safari on iPhone can play by itself; anything else (MKV, AVI…) needs the TV app or VLC.
+const SAFARI_RE = /\.(mp4|m4v|mov|mp3|m4a|aac|wav|flac)$/i;
+const isMedia = name => MEDIA_RE.test(name || "");
+function openVideo(e) {
+  const src = `/api/files/stream?path=${enc(e.path)}`;
+  const audio = /\.(mp3|m4a|aac|flac|wav|ogg|opus)$/i.test(e.name);
+  const note = h("div", { class: "section-foot", style: "text-align:center;margin-top:-26px" },
+    SAFARI_RE.test(e.name) ? "" : "iPhone can't play this kind of file itself. Use Open in VLC below, or play it on the TV in Harbour → Files.");
+  const player = h(audio ? "audio" : "video", { src, controls: true, playsinline: true, autoplay: true, preload: "metadata",
+    style: audio ? "width:100%;margin:24px 0" : "position:absolute;inset:0;width:100%;height:100%;background:#000" });
+  player.addEventListener("error", () => { note.textContent = "This file won't play on the iPhone. Try Open in VLC, or play it on the TV in Harbour → Files."; });
+  const vlc = `vlc-x-callback://x-callback-url/stream?url=${enc(location.origin + src)}`;
+  const m = h("div", { class: "modal trailer" },
+    h("div", { class: "navbar always solid" }, h("div", { class: "left" }, h("button", { class: "navbtn bold", onclick: () => close() }, "Done")),
+      h("div", { class: "title" }, e.name), h("div", { class: "right" })),
+    h("div", { class: "mbody", style: "display:flex;flex-direction:column;justify-content:center" },
+      audio ? player : h("div", { style: "position:relative;width:100%;aspect-ratio:16/9;background:#000" }, player),
+      h("div", { class: "section", style: "margin-top:22px" }, h("div", { class: "group" },
+        h("a", { class: "cell tint center", href: vlc, style: "text-decoration:none" }, "Open in VLC"),
+        h("button", { class: "cell tint center", style: "width:100%", onclick: () => close() }, "Close"))),
+      note));
+  document.body.append(m);
+  requestAnimationFrame(() => requestAnimationFrame(() => m.classList.add("show")));
+  function close() { player.pause(); player.removeAttribute("src"); player.load(); m.classList.remove("show"); setTimeout(() => m.remove(), 360); }
+}
+
 function openTrailer(key, title) {
   if (!key) return;
   const watch = `https://www.youtube.com/watch?v=${enc(key)}`;
@@ -2038,10 +2066,19 @@ function XScreen() {
   }
   const STATUS = { queued: "Waiting", downloading: "Downloading", saving: "Saving to NAS", done: "Saved", failed: "Failed" };
   function drawJobs() {
-    if (!jobs.length) { jobsBox.replaceChildren(); return; }
+    if (!jobs.length) {
+      jobsBox.replaceChildren(S.config?.files ? h("div", { class: "section" }, h("div", { class: "group" },
+        h("button", { class: "cell", style: "--inset:57px", onclick: openFolder },
+          h("span", { class: "icon", style: "background:#1ea1f2" }, svg("folder")),
+          h("div", { class: "main" }, h("div", { class: "t" }, "Saved videos"), h("div", { class: "s" }, S.xFolder || "/data/media/twitter")),
+          svg("chev")))) : "");
+      return;
+    }
     const anyFinished = jobs.some(j => ["done", "failed"].includes(j.status));
-    jobsBox.replaceChildren(h("div", { class: "section-head", style: "display:flex;align-items:center" },
+    jobsBox.replaceChildren(h("div", { class: "section-head", style: "display:flex;align-items:center;gap:16px" },
         h("span", { style: "flex:1" }, "Recent"),
+        S.config?.files && h("button", { class: "navbtn", style: "height:auto;padding:0;font-size:15px;text-transform:none;letter-spacing:0",
+          onclick: openFolder }, "Open folder"),
         anyFinished && h("button", { class: "navbtn", style: "height:auto;padding:0;font-size:15px;text-transform:none;letter-spacing:0", onclick: clearAll }, "Clear")),
       h("div", { class: "section" }, h("div", { class: "group" }, jobs.map(j => {
       const pct = Math.round((j.progress || 0) * 100), done = j.status === "done", bad = j.status === "failed";
@@ -2053,6 +2090,7 @@ function XScreen() {
         (done || bad) && h("button", { class: "navbtn", "aria-label": "Remove from list", style: "color:var(--label-3);font-size:20px;padding:0 8px;flex:none", onclick: () => forget(j.id) }, "✕"));
     }))));
   }
+  function openFolder() { push(FilesScreen(S.xFolder || "/data/media/twitter")); }
   async function forget(id) {
     try { const r = await api("DELETE", `/api/x/jobs/${enc(id)}`); jobs = r.jobs || []; drawJobs(); } catch (e) { errToast(e); }
   }
@@ -2102,7 +2140,7 @@ function FilesScreen(path) {
       ic.firstChild.style.cssText = "width:28px;height:28px";
       return h("div", { class: "cell tap", style: "--inset:58px;padding-right:4px" },
         h("button", { style: "display:flex;align-items:center;gap:12px;flex:1;min-width:0;text-align:left",
-          onclick: () => e.isDir ? push(FilesScreen(e.path)) : entryMenu(e) },
+          onclick: () => e.isDir ? push(FilesScreen(e.path)) : isMedia(e.name) ? openVideo(e) : entryMenu(e) },
           ic, h("div", { class: "main" }, h("div", { class: "t" }, e.name),
             h("div", { class: "s" }, [e.isDir ? "" : fmtBytes(e.size), fmtDate(e.modified)].filter(Boolean).join(" · ")))),
         path ? h("button", { class: "navbtn", "aria-label": "More", style: "color:var(--label-2)", onclick: () => entryMenu(e) }, svg("more")) : svg("chev"));
@@ -2110,9 +2148,11 @@ function FilesScreen(path) {
   }
   async function entryMenu(e) {
     const a = await actionSheet(e.name, e.isDir ? "Folder" : fmtBytes(e.size), [
+      ...(!e.isDir && isMedia(e.name) ? [{ label: "Play", value: "play" }] : []),
       { label: "Rename", value: "rename" }, { label: "Move…", value: "move" }, { label: "Copy…", value: "copy" },
       { label: "Delete", value: "delete", danger: true }]);
     if (!a) return;
+    if (a === "play") { openVideo(e); return; }
     if (a === "rename") {
       const nn = await promptBox("Rename", null, e.name, "Rename");
       if (nn && nn !== e.name) op({ op: "rename", path: e.path, name: nn });
