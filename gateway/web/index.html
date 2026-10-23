@@ -75,6 +75,15 @@ html.wide #tabbar button { flex: 0 1 110px; }
 html.wide .modal.trailer .mbody > div:first-child { max-width: 1100px; margin: 0 auto; }
 /* landscape & notch / under-display camera: keep content clear of the sides */
 .screen, #tabbar { padding-left: env(safe-area-inset-left, 0px); padding-right: env(safe-area-inset-right, 0px); }
+/* Side by side, the list only touches the left edge and the details only touch the right edge, so each
+   pane keeps clear of its own edge only. (On the Duo opened, the status column sits on the right; the
+   list was padded for it too, leaving a gap before the fold.) */
+.tab.split .screen.root { padding-right: 0; }
+.tab.split .screen:not(.root) { padding-left: 0; }
+/* Full-screen sheets (trailer, folder picker) span both edges: keep their buttons clear of the
+   status column and side cut-outs. */
+.modal .navbar { padding-left: calc(8px + env(safe-area-inset-left, 0px)); padding-right: calc(8px + env(safe-area-inset-right, 0px)); }
+.modal .mbody { padding-left: env(safe-area-inset-left, 0px); padding-right: env(safe-area-inset-right, 0px); }
 
 .navbar { position: sticky; top: 0; z-index: 5; display: grid; grid-template-columns: 1fr auto 1fr; align-items: center;
   height: calc(44px + var(--top)); padding: var(--top) 8px 0; background: transparent;
@@ -318,8 +327,17 @@ button.cell:active, .cell.tap:active { background: var(--cell-2); }
 #toast { position: fixed; left: 50%; top: calc(var(--top) + 10px); transform: translate(-50%, -150%); z-index: 60;
   background: var(--cell); color: var(--label); padding: 11px 18px; border-radius: 22px; font-size: 15px; font-weight: 500;
   box-shadow: 0 8px 30px rgba(0,0,0,.18); max-width: calc(100% - 32px); transition: transform .35s cubic-bezier(.2,.9,.3,1.2);
-  text-align: center; }
-#toast.show { transform: translate(-50%, 0); }
+  text-align: center; pointer-events: none; visibility: hidden;
+  transition: transform .35s cubic-bezier(.2,.9,.3,1.2), visibility 0s .35s; }
+/* Hidden: fully above the screen (not just its own height, which left it peeking over the fold on the
+   Duo), and never in the way of taps — it used to sit on top of the detail pane's back button. */
+#toast { transform: translate(-50%, calc(-100% - var(--top) - 50px)); }
+#toast:empty { display: none; }
+/* Side by side, the top centre is where the two nav bars meet (the detail pane's back button), so
+   messages rise from above the tab bar instead. */
+html.wide #toast { top: auto; bottom: calc(var(--tabbar) + 14px); transform: translate(-50%, calc(100% + var(--tabbar) + 40px)); }
+html.wide #toast.show { transform: translate(-50%, 0); }
+#toast.show { transform: translate(-50%, 0); visibility: visible; transition: transform .35s cubic-bezier(.2,.9,.3,1.2), visibility 0s; }
 #toast.bad { color: var(--red); }
 .dim { position: fixed; inset: 0; background: var(--sheet-dim); z-index: 40; opacity: 0; transition: opacity .25s; }
 .dim.show { opacity: 1; }
@@ -1635,13 +1653,15 @@ function openTrailer(key, title) {
     style: "position:absolute;inset:0;width:100%;height:100%;border:0",
   });
   const m = h("div", { class: "modal trailer" },
-    h("div", { class: "navbar always solid" }, h("div", { class: "left" }),
+    // Done sits on the left: on the Duo opened, the status column covers the top-right corner.
+    h("div", { class: "navbar always solid" }, h("div", { class: "left" }, h("button", { class: "navbtn bold", onclick: () => close() }, "Done")),
       h("div", { class: "title" }, title ? `${title}` : "Trailer"),
-      h("div", { class: "right" }, h("button", { class: "navbtn bold", onclick: () => close() }, "Done"))),
+      h("div", { class: "right" })),
     h("div", { class: "mbody", style: "display:flex;flex-direction:column;justify-content:center" },
       h("div", { style: "position:relative;width:100%;aspect-ratio:16/9;background:#000" }, frame),
       h("div", { class: "section", style: "margin-top:22px" }, h("div", { class: "group" },
-        h("a", { class: "cell tint center", href: watch, target: "_blank", rel: "noopener", style: "text-decoration:none" }, "Open in YouTube"))),
+        h("a", { class: "cell tint center", href: watch, target: "_blank", rel: "noopener", style: "text-decoration:none" }, "Open in YouTube"),
+        h("button", { class: "cell tint center", style: "width:100%", onclick: () => close() }, "Close trailer"))),
       h("div", { class: "section-foot", style: "text-align:center;margin-top:-26px" }, "If it won't play here, YouTube may not allow it outside its own app.")));
   document.body.append(m);
   requestAnimationFrame(() => requestAnimationFrame(() => m.classList.add("show")));
