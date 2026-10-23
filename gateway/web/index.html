@@ -410,6 +410,8 @@ html.wide #toast.show { transform: translate(-50%, 0); }
   background: linear-gradient(rgba(0,0,0,.8), rgba(0,0,0,0)); }
 .rdr .top .tt { flex: 1; min-width: 0; font-size: 15px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .rdr .top button { color: #fff; font-size: 16px; padding: 8px 10px; }
+.rdr .top .close { flex: none; min-width: 88px; height: 40px; border-radius: 20px; background: rgba(255,255,255,.18);
+  font-size: 15px; font-weight: 600; touch-action: manipulation; }
 .rdr .bot { position: absolute; left: 0; right: 0; bottom: 0; padding: 18px 16px calc(var(--bottom) + 14px); background: linear-gradient(rgba(0,0,0,0), rgba(0,0,0,.85)); }
 .rdr .bot input[type=range] { width: 100%; accent-color: #0a84ff; }
 .rdr .bot .row2 { display: flex; justify-content: space-between; align-items: center; font-size: 13px; color: rgba(255,255,255,.75); margin-top: 6px; }
@@ -975,10 +977,21 @@ async function openReader(bookId, onClose) {
   const title = h("div", { class: "tt" }, "Loading…");
   const slider = h("input", { type: "range", min: 1, max: 1, value: 1 });
   const where = h("span", {}, "");
+  // Safari on the Duo didn't always turn a tap on the small ✕ into a click, so the reader's
+  // buttons act on the finger lifting as well (whichever comes first), and the ✕ is a big target.
+  const tapBtn = (cls, label, fn, aria) => {
+    let fired = 0;
+    const go = e => { e.preventDefault(); e.stopPropagation(); if (Date.now() - fired > 400) { fired = Date.now(); fn(); } };
+    const b = h("button", { class: cls, "aria-label": aria || label }, label);
+    b.addEventListener("pointerup", go); b.addEventListener("click", go);
+    b.addEventListener("pointerdown", e => e.stopPropagation());
+    return b;
+  };
+  const closeBtn = tapBtn("close", "✕  Close", () => close(), "Close comic");
   const prevBtn = h("button", { onclick: () => switchBook(data?.prev) }, "‹ Previous issue");
   const nextBtn = h("button", { onclick: () => switchBook(data?.next) }, "Next issue ›");
   const bars = h("div", { class: "bars" },
-    h("div", { class: "top" }, h("button", { onclick: () => close(), "aria-label": "Close" }, "✕"), title),
+    h("div", { class: "top" }, closeBtn, title),
     h("div", { class: "bot" }, slider, h("div", { class: "row2" }, prevBtn, where, nextBtn)));
   el.append(stage, bars, h("div", { class: "spin" }));
   document.body.append(el);
@@ -986,7 +999,9 @@ async function openReader(bookId, onClose) {
 
   let data = null, pages = [], spreads = [], idx = 0, saveTimer = null, lastSaved = 0, hideTimer = null;
   const url = n => `/api/comics/page/${enc(data.book.id)}/${n}`;
-  const wideMode = () => innerWidth > innerHeight * 1.05 || WIDE.matches;
+  // Two pages side by side only when the screen is wider than tall (the Duo held sideways, or a
+  // phone in landscape). The Duo opened in portrait is tall, so it gets one big page.
+  const wideMode = () => innerWidth > innerHeight * 1.05;
   function buildSpreads() {
     spreads = [];
     if (!wideMode()) { pages.forEach(p => spreads.push([p.n])); return; }
@@ -1065,6 +1080,7 @@ async function openReader(bookId, onClose) {
     clearTimeout(saveTimer); clearTimeout(hideTimer);
     if (data) save(currentPage(), currentPage() >= pages.length);
     removeEventListener("resize", onResize);
+    removeEventListener("keydown", onKey);
     document.documentElement.style.overflow = "";
     el.remove();
     onClose?.();
@@ -1075,6 +1091,8 @@ async function openReader(bookId, onClose) {
     buildSpreads(); idx = spreadOf(keep); show();
   }
   addEventListener("resize", onResize);
+  const onKey = e => { if (e.key === "Escape") close(); else if (e.key === "ArrowRight") go(1); else if (e.key === "ArrowLeft") go(-1); };
+  addEventListener("keydown", onKey);
 
   // ---- touch: tap zones, swipe, pinch / double-tap zoom, pan
   const zoom = { s: 1, x: 0, y: 0 };
@@ -1124,6 +1142,7 @@ async function openReader(bookId, onClose) {
     const dx = e.clientX - st.x, dy = e.clientY - st.y, dt = Date.now() - st.t;
     if (moved) {
       if (zoom.s <= 1.01 && Math.abs(dx) > 50 && Math.abs(dx) > Math.abs(dy) * 1.3 && dt < 700) go(dx < 0 ? 1 : -1);
+      else if (zoom.s <= 1.01 && dy > 120 && dy > Math.abs(dx) * 1.5 && dt < 800) close();   // pull down to close
       return;
     }
     // a tap: double-tap zooms, edges turn the page, the middle shows the controls
