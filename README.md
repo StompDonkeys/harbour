@@ -1,6 +1,6 @@
 # Harbour V3
 
-A Fire TV app for your Synology *arr stack — Radarr, Sonarr, Jellyseerr, Plex, Tautulli, Prowlarr, NZBGet, qBittorrent and File Station — designed for the remote, not a mouse.
+A Fire TV app for your Synology *arr stack — Radarr, Sonarr, Jellyseerr, Plex, Tautulli, Komga, Prowlarr, NZBGet, qBittorrent and File Station — designed for the remote, not a mouse.
 
 ```
  Fire TV / phone                      Synology NAS
@@ -59,6 +59,7 @@ Make sure your Docker user has **Read/Write** on that folder (File Station → f
 | **Calendar** | Month view of releases; click an episode to manage it. |
 | **Discussion** | On every movie, show and episode page: comments from Trakt (the TV Time-style conversation), most liked or newest, spoilers hidden until you open them, replies underneath. Needs a free Trakt Client ID in the phone app: Settings → Trakt. |
 | **Activity** | Plex activity from Tautulli: who's watching now (direct play or transcode, quality, bandwidth), watch history per person, and the most watched titles, people and devices. Also on the phone: Home → *Plex activity*. |
+| **Comics** (phone) | Your CBZ/CBR library through Komga: Continue reading, Up next, new series, every series A–Z and search. The reader shows one page folded and two-page spreads unfolded (split at the hinge); tap the edges or swipe to turn, pinch or double-tap to zoom. Progress syncs to Komga. |
 | **Downloads** | NZBGet + qBittorrent queues: pause, resume, delete. |
 | **Files** | Browse, move, copy, rename and delete on the NAS. Press OK on a video or audio file to play it on the TV. |
 | **Settings** | Pairing, Plex profile, updates, demo screen recording (saved to the NAS). |

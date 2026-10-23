@@ -1555,3 +1555,63 @@ def test_trakt_discussion(client, monkeypatch):
 
     responses.get("https://api.trakt.tv/comments/5/replies", json=[{"id": 6, "comment": "Agreed", "user": {"username": "helly"}}])
     assert client.get("/api/discuss/replies/5", headers=H).get_json()["comments"][0]["user"] == "helly"
+
+
+@responses.activate
+def test_komga_comics(client, monkeypatch):
+    assert client.get("/api/config", headers=H).get_json()["comics"] is False
+    assert client.get("/api/comics/home", headers=H).status_code == 404
+    monkeypatch.setitem(gw.CFG, "komga", {"url": "http://nas:25600", "api_key": "kk"})
+    assert client.get("/api/config", headers=H).get_json()["comics"] is True
+    K = "http://nas:25600/api/v1"
+
+    def book(i, page=None, done=False, num="1"):
+        return {"id": f"B{i}XXXXX", "seriesId": "S1XXXXX", "seriesTitle": "Saga", "name": f"Saga {num:0>3}",
+                "metadata": {"title": f"Chapter {num}", "number": num, "releaseDate": "2012-03-14"},
+                "media": {"pagesCount": 24, "status": "READY"}, "sizeBytes": 40_000_000,
+                "readProgress": {"page": page, "completed": done} if page else None}
+    series = {"id": "S1XXXXX", "name": "Saga", "booksCount": 3, "booksReadCount": 1, "booksUnreadCount": 1,
+              "booksInProgressCount": 1, "metadata": {"title": "Saga", "publisher": "Image", "status": "ONGOING"},
+              "booksMetadata": {"releaseDate": "2012-03-14", "summary": "Space opera."}}
+
+    def check_key(req):
+        return (req.headers.get("X-API-Key") == "kk", "api key")
+    responses.get(f"{K}/books", match=[check_key], json={"content": [book(2, page=7, num="2")]})
+    responses.get(f"{K}/books/ondeck", json={"content": [book(2, page=7, num="2"), book(3, num="3")]})
+    responses.get(f"{K}/series/new", json={"content": [series]})
+    responses.get(f"{K}/series/updated", json={"content": [series]})
+    responses.get(f"{K}/libraries", json=[{"id": "L1XXXXX", "name": "Comics"}])
+    h = client.get("/api/comics/home", headers=H).get_json()
+    assert h["reading"][0]["page"] == 7 and h["reading"][0]["label"] == "#2"
+    assert [b["id"] for b in h["deck"]] == ["B3XXXXX"]            # already in Continue reading
+    assert h["new"][0]["publisher"] == "Image" and h["updated"] == [] and h["libraries"][0]["name"] == "Comics"
+
+    responses.get(f"{K}/series", json={"content": [series], "number": 0, "totalPages": 1, "totalElements": 1})
+    sl = client.get("/api/comics/series?search=sag", headers=H).get_json()
+    assert sl["items"][0]["year"] == "2012" and sl["items"][0]["cover"] == "/api/comics/img/series/S1XXXXX"
+    assert "search=sag" in responses.calls[-1].request.url
+
+    responses.get(f"{K}/series/S1XXXXX", json=series)
+    responses.get(f"{K}/series/S1XXXXX/books",
+                  json={"content": [book(1, page=24, done=True), book(2, page=7, num="2"), book(3, num="3")]})
+    sp = client.get("/api/comics/series/S1XXXXX", headers=H).get_json()
+    assert sp["next"] == "B2XXXXX" and len(sp["books"]) == 3 and sp["books"][0]["done"] is True
+
+    responses.get(f"{K}/books/B2XXXXX", json=book(2, page=7, num="2"))
+    responses.get(f"{K}/books/B2XXXXX/pages", json=[{"number": 1, "width": 1988, "height": 3056},
+                                                    {"number": 2, "width": 3976, "height": 3056}])
+    responses.get(f"{K}/books/B2XXXXX/previous", json=book(1))
+    responses.get(f"{K}/books/B2XXXXX/next", status=404)
+    bp = client.get("/api/comics/book/B2XXXXX", headers=H).get_json()
+    assert bp["pages"][1] == {"n": 2, "w": 3976, "h": 3056} and bp["prev"] == "B1XXXXX" and bp["next"] is None
+
+    responses.patch(f"{K}/books/B2XXXXX/read-progress", status=204)
+    assert client.post("/api/comics/book/B2XXXXX/progress", json={"page": 9}, headers=H).get_json() == {"ok": True}
+    assert json.loads(responses.calls[-1].request.body) == {"page": 9, "completed": False}
+
+    responses.get(f"{K}/books/B2XXXXX/pages/3", body=b"\xff\xd8jpeg", content_type="image/jpeg")
+    r = client.get("/api/comics/page/B2XXXXX/3", headers=H)
+    assert r.status_code == 200 and r.data == b"\xff\xd8jpeg" and r.mimetype == "image/jpeg"
+    responses.get(f"{K}/books/B2XXXXX/thumbnail", body=b"png", content_type="image/png")
+    assert client.get("/api/comics/img/book/B2XXXXX", headers=H).data == b"png"
+    assert client.get("/api/comics/page/..%2Fx/1", headers=H).status_code in (400, 404)

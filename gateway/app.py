@@ -3532,7 +3532,7 @@ def normalise_config(c):
                 c.pop(key, None)
         elif v is not None and not filled(v):
             c.pop(key, None)
-    for key in ("plex", "prowlarr", "filestation", "tautulli"):
+    for key in ("plex", "prowlarr", "filestation", "tautulli", "komga"):
         if key in c and not filled(c[key]):
             c.pop(key)
     if isinstance(c.get("tmdb"), dict) and not (c["tmdb"].get("api_key") or "").strip():
@@ -3779,6 +3779,9 @@ def test_service(kind, c):
             r.raise_for_status()
             n = len((r.json().get("MediaContainer") or {}).get("Directory") or [])
             return {"ok": True, "message": f"Connected · {n} libraries ✓"}
+        if kind == "komga":
+            libs = Komga(c).get("/api/v1/libraries")
+            return {"ok": True, "message": f"Komga answered · {len(libs)} librar{'y' if len(libs) == 1 else 'ies'} ✓"}
         if kind == "trakt":
             r = requests.get("https://api.trakt.tv/movies/trending", params={"limit": 1},
                              headers=Trakt(c).headers, timeout=10)
@@ -4223,6 +4226,7 @@ def config():
                    xdl=x_available(),
                    activity=bool((CFG.get("tautulli") or {}).get("api_key")),
                    discuss=trakt_on(),
+                   comics=bool((CFG.get("komga") or {}).get("api_key")),
                    gatewayUpdate=gateway_update(),
                    repo=CFG.get("github_repo") or DEFAULT_REPO)
 
@@ -4689,6 +4693,183 @@ def discuss_route():
 @app.get("/api/discuss/replies/<int:cid>")
 def discuss_replies(cid):
     return jsonify(trakt().replies(cid))
+
+
+# ---------------------------------------------------------------- Komga (comics)
+#
+# Your CBZ/CBR library through Komga: series, issues, pages and reading progress. The phone's
+# reader loads every image through the gateway, so it works at home and away the same way.
+
+class Komga:
+    def __init__(self, conf):
+        self.url = conf["url"].rstrip("/")
+        self.headers = {"X-API-Key": (conf.get("api_key") or "").strip(), "Accept": "application/json"}
+
+    def req(self, method, path, timeout=20, **kw):
+        r = requests.request(method, self.url + path, headers=self.headers, timeout=timeout, **kw)
+        if r.status_code in (401, 403):
+            raise ApiError("Komga rejected the API key — make a new one in Komga → Account → API keys", 502)
+        if r.status_code == 404:
+            raise ApiError("Komga doesn't have that", 404)
+        r.raise_for_status()
+        return r
+
+    def get(self, path, **params):
+        return self.req("GET", path, params=params).json()
+
+    @staticmethod
+    def book(b):
+        md = b.get("metadata") or {}
+        rp = b.get("readProgress") or {}
+        media = b.get("media") or {}
+        num = md.get("number") or ""
+        return clean({
+            "id": b["id"], "seriesId": b.get("seriesId"), "series": b.get("seriesTitle"),
+            "title": md.get("title") or b.get("name"),
+            "number": num, "label": f"#{num}" if num and str(num)[:1].isdigit() else (num or None),
+            "pages": media.get("pagesCount") or 0,
+            "page": rp.get("page") or 0, "done": bool(rp.get("completed")),
+            "date": md.get("releaseDate"), "summary": md.get("summary") or None,
+            "size": b.get("sizeBytes"),
+            "cover": f"/api/comics/img/book/{b['id']}",
+            "unreadable": media.get("status") not in (None, "READY"),
+        })
+
+    @staticmethod
+    def series(x):
+        md = x.get("metadata") or {}
+        bmd = x.get("booksMetadata") or {}
+        date = bmd.get("releaseDate") or ""
+        return clean({
+            "id": x["id"], "title": md.get("title") or x.get("name"), "libraryId": x.get("libraryId"),
+            "books": x.get("booksCount") or 0, "read": x.get("booksReadCount") or 0,
+            "unread": x.get("booksUnreadCount") or 0, "inProgress": x.get("booksInProgressCount") or 0,
+            "publisher": md.get("publisher") or None, "year": date[:4] or None,
+            "status": (md.get("status") or "").title() or None,
+            "summary": md.get("summary") or bmd.get("summary") or None,
+            "cover": f"/api/comics/img/series/{x['id']}",
+        })
+
+    def home(self):
+        got = par(
+            reading=lambda: safe(lambda: self.get("/api/v1/books", read_status="IN_PROGRESS", size=20,
+                                                  sort="readProgress.readDate,desc"), "komga reading", {}),
+            deck=lambda: safe(lambda: self.get("/api/v1/books/ondeck", size=20), "komga on deck", {}),
+            new=lambda: safe(lambda: self.get("/api/v1/series/new", size=20), "komga new", {}),
+            updated=lambda: safe(lambda: self.get("/api/v1/series/updated", size=20), "komga updated", {}),
+            libs=lambda: safe(lambda: self.get("/api/v1/libraries"), "komga libraries", []),
+        )
+        reading = [self.book(b) for b in (got["reading"] or {}).get("content") or []]
+        seen = {b["id"] for b in reading}
+        deck = [self.book(b) for b in (got["deck"] or {}).get("content") or [] if b["id"] not in seen]
+        new = [self.series(x) for x in (got["new"] or {}).get("content") or []]
+        new_ids = {x["id"] for x in new}
+        updated = [self.series(x) for x in (got["updated"] or {}).get("content") or [] if x["id"] not in new_ids]
+        return {"reading": reading, "deck": deck, "new": new, "updated": updated,
+                "libraries": [{"id": l["id"], "name": l.get("name")} for l in got["libs"] or []]}
+
+    def series_list(self, search="", page=0, library=None, size=60):
+        params = {"page": max(0, int(page)), "size": size, "sort": "metadata.titleSort,asc"}
+        if search:
+            params["search"] = search
+        if library:
+            params["library_id"] = library
+        d = self.get("/api/v1/series", **params)
+        return {"items": [self.series(x) for x in d.get("content") or []],
+                "page": d.get("number", 0), "pages": d.get("totalPages", 1), "total": d.get("totalElements", 0)}
+
+    def series_page(self, sid):
+        got = par(s=lambda: self.get(f"/api/v1/series/{sid}"),
+                  b=lambda: self.get(f"/api/v1/series/{sid}/books", size=2000, sort="metadata.numberSort,asc"))
+        books = [self.book(b) for b in got["b"].get("content") or []]
+        nxt = next((b for b in books if 0 < b.get("page", 0) and not b.get("done")), None) or \
+            next((b for b in books if not b.get("done")), None)
+        return {"series": self.series(got["s"]), "books": books, "next": nxt["id"] if nxt else None}
+
+    def book_page(self, bid):
+        def sibling(which):
+            try:
+                return self.get(f"/api/v1/books/{bid}/{which}").get("id")
+            except ApiError:
+                return None
+        got = par(b=lambda: self.get(f"/api/v1/books/{bid}"),
+                  pages=lambda: self.get(f"/api/v1/books/{bid}/pages"),
+                  prev=lambda: safe(lambda: sibling("previous"), "komga previous", None),
+                  next=lambda: safe(lambda: sibling("next"), "komga next", None))
+        pages = [clean({"n": p.get("number"), "w": p.get("width"), "h": p.get("height")}) for p in got["pages"] or []]
+        return {"book": self.book(got["b"]), "pages": pages, "prev": got["prev"], "next": got["next"]}
+
+    def progress(self, bid, page, completed=False):
+        self.req("PATCH", f"/api/v1/books/{bid}/read-progress",
+                 json={"page": max(1, int(page)), "completed": bool(completed)})
+        return {"ok": True}
+
+    def image(self, path):
+        r = self.req("GET", path, timeout=60, stream=True)
+        headers = {"Cache-Control": "private, max-age=604800"}
+        if r.headers.get("Content-Length"):
+            headers["Content-Length"] = r.headers["Content-Length"]
+        return Response(stream_with_context(r.iter_content(128 * 1024)),
+                        mimetype=r.headers.get("Content-Type", "image/jpeg"), headers=headers)
+
+
+def komga():
+    k = CFG.get("komga") or {}
+    if not k.get("url") or not k.get("api_key"):
+        raise ApiError("Comics need Komga — add it in Settings → Komga", 404)
+    return Komga(k)
+
+
+KOMGA_ID = re.compile(r"^[A-Za-z0-9]{6,40}$")
+
+
+def komga_id(x):
+    if not KOMGA_ID.match(x or ""):
+        raise ApiError("Bad id")
+    return x
+
+
+@app.get("/api/comics/home")
+def comics_home():
+    return jsonify(komga().home())
+
+
+@app.get("/api/comics/series")
+def comics_series():
+    a = request.args
+    lib = a.get("library") or None
+    return jsonify(komga().series_list(a.get("search", "").strip(), a.get("page") or 0,
+                                       komga_id(lib) if lib else None))
+
+
+@app.get("/api/comics/series/<sid>")
+def comics_series_page(sid):
+    return jsonify(komga().series_page(komga_id(sid)))
+
+
+@app.get("/api/comics/book/<bid>")
+def comics_book(bid):
+    return jsonify(komga().book_page(komga_id(bid)))
+
+
+@app.post("/api/comics/book/<bid>/progress")
+def comics_progress(bid):
+    b = request.get_json(silent=True) or {}
+    return jsonify(komga().progress(komga_id(bid), b.get("page") or 1, b.get("completed")))
+
+
+@app.get("/api/comics/img/<kind>/<xid>")
+def comics_thumb(kind, xid):
+    if kind not in ("series", "book"):
+        raise ApiError("Bad image")
+    path = "series" if kind == "series" else "books"
+    return komga().image(f"/api/v1/{path}/{komga_id(xid)}/thumbnail")
+
+
+@app.get("/api/comics/page/<bid>/<int:n>")
+def comics_page(bid, n):
+    small = request.args.get("thumb") == "1"
+    return komga().image(f"/api/v1/books/{komga_id(bid)}/pages/{max(1, n)}" + ("/thumbnail" if small else ""))
 
 
 def files():
