@@ -129,6 +129,10 @@ html.rail #tabbar button { flex: none; width: 60px; height: 60px; border-radius:
   box-shadow: 0 0 0 .5px var(--sep), 0 2px 8px rgba(0,0,0,.08); color: var(--label); }
 html.rail #tabbar button svg { width: 27px; height: 27px; }
 html.rail #tabbar button.on { background: var(--tint); color: #fff; box-shadow: 0 3px 10px rgba(0,122,255,.35); }
+html.rail-left #tabbar { right: auto; left: 0; width: env(safe-area-inset-left, 80px); }
+html.rail-land #tabbar { top: max(64px, calc(50vh - 210px)); gap: 8px; }
+html.rail-land #tabbar button { width: 52px; height: 52px; }
+html.rail-land #tabbar button svg { width: 24px; height: 24px; }
 html.rail .navbar.big { position: relative; }
 html.rail .navbar.big.solid { background: transparent; box-shadow: none; -webkit-backdrop-filter: none; backdrop-filter: none; }
 html.rail .navbar.big .title { opacity: 0 !important; }
@@ -651,14 +655,21 @@ function foldGeometry() {
 }
 // The Duo folded puts its status bar in a wide column on the right (a big right safe area).
 const railProbe = document.createElement("div");
-railProbe.style.cssText = "position:fixed;visibility:hidden;pointer-events:none;padding-right:env(safe-area-inset-right,0px)";
+railProbe.style.cssText = "position:fixed;visibility:hidden;pointer-events:none;padding-right:env(safe-area-inset-right,0px);padding-left:env(safe-area-inset-left,0px)";
 document.documentElement.append(railProbe);
 function applyLayout() {
   foldGeometry();
-  const wide = WIDE.matches;
-  document.documentElement.classList.toggle("wide", wide);
-  const sideInset = parseFloat(getComputedStyle(railProbe).paddingRight) || 0;
-  document.documentElement.classList.toggle("rail", !wide && sideInset >= 48 && innerHeight > innerWidth);
+  // The folded Duo's status column is far wider than a notch (~120pt vs ~60pt), in portrait (right)
+  // or turned sideways (left). Then the tabs go in that column and the app stays one column.
+  const cs = getComputedStyle(railProbe);
+  const right = parseFloat(cs.paddingRight) || 0, left = parseFloat(cs.paddingLeft) || 0;
+  const railSide = right >= 90 ? "right" : left >= 90 ? "left" : "";
+  const root = document.documentElement;
+  root.classList.toggle("rail", !!railSide);
+  root.classList.toggle("rail-left", railSide === "left");
+  root.classList.toggle("rail-land", !!railSide && innerWidth > innerHeight);
+  const wide = WIDE.matches && !railSide;
+  root.classList.toggle("wide", wide);
   for (const t of Object.values(S.tabs)) {
     t.el.classList.toggle("split", wide && !!t.def.split);
     t.el.classList.toggle("solo", t.stack.length < 2);
