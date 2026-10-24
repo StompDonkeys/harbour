@@ -45,6 +45,7 @@ Make sure your Docker user has **Read/Write** on that folder (File Station → f
 
 ## Update
 
+- **Gateway, quick way:** copy `gateway/update.sh` into `/volume1/docker/harbour-gateway/` once. Then either SSH in and run `sudo sh /volume1/docker/harbour-gateway/update.sh`, or add it to DSM **Task Scheduler** (Create → Scheduled Task → User-defined script, user **root**, script `sh /volume1/docker/harbour-gateway/update.sh`) and press **Run** whenever you want to update — or give it a nightly schedule so it updates itself.
 - **Gateway:** Container Manager → **Project** → harbour-gateway → **Action → Stop**, then **Action → Clean**. Then **Image** → delete `ghcr.io/stompdonkeys/harbour-gateway`, and back in **Project** → **Action → Build** (downloads the newest). Settings are kept. The setup page and the TV tell you when one's available.
 - **TV app:** Harbour → **Settings → Install**.
 
