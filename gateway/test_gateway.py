@@ -1612,7 +1612,9 @@ def test_komga_comics(client, monkeypatch):
     responses.get(f"{K}/books/B2XXXXX/pages/3", body=b"\xff\xd8jpeg", content_type="image/jpeg")
     r = client.get("/api/comics/page/B2XXXXX/3", headers=H)
     assert r.status_code == 200 and r.data == b"\xff\xd8jpeg" and r.mimetype == "image/jpeg"
-    responses.get(f"{K}/books/B2XXXXX/thumbnail", body=b"png", content_type="image/png")
+    def img_accept(req):
+        return ("image/" in req.headers.get("Accept", ""), "accept image")
+    responses.get(f"{K}/books/B2XXXXX/thumbnail", body=b"png", content_type="image/png", match=[img_accept])
     assert client.get("/api/comics/img/book/B2XXXXX", headers=H).data == b"png"
     assert client.get("/api/comics/page/..%2Fx/1", headers=H).status_code in (400, 404)
 

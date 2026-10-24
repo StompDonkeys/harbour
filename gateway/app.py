@@ -4705,8 +4705,9 @@ class Komga:
         self.url = conf["url"].rstrip("/")
         self.headers = {"X-API-Key": (conf.get("api_key") or "").strip(), "Accept": "application/json"}
 
-    def req(self, method, path, timeout=20, **kw):
-        r = requests.request(method, self.url + path, headers=self.headers, timeout=timeout, **kw)
+    def req(self, method, path, timeout=20, accept=None, **kw):
+        headers = dict(self.headers, Accept=accept) if accept else self.headers
+        r = requests.request(method, self.url + path, headers=headers, timeout=timeout, **kw)
         if r.status_code in (401, 403):
             raise ApiError("Komga rejected the API key — make a new one in Komga → Account → API keys", 502)
         if r.status_code == 404:
@@ -4805,7 +4806,8 @@ class Komga:
         return {"ok": True}
 
     def image(self, path):
-        r = self.req("GET", path, timeout=60, stream=True)
+        # Ask for an image: Komga's thumbnail endpoints refuse (406) a request that only accepts JSON.
+        r = self.req("GET", path, timeout=60, stream=True, accept="image/webp,image/jpeg,image/png,image/*;q=0.8,*/*;q=0.5")
         headers = {"Cache-Control": "private, max-age=604800"}
         if r.headers.get("Content-Length"):
             headers["Content-Length"] = r.headers["Content-Length"]
