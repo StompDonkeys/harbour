@@ -659,11 +659,12 @@ railProbe.style.cssText = "position:fixed;visibility:hidden;pointer-events:none;
 document.documentElement.append(railProbe);
 function applyLayout() {
   foldGeometry();
-  // The folded Duo's status column is far wider than a notch (~120pt vs ~60pt), in portrait (right)
-  // or turned sideways (left). Then the tabs go in that column and the app stays one column.
+  // The folded Duo's status column sits on one side only, in portrait (right) or turned sideways (left). Then the tabs go in that column and the app stays one column.
   const cs = getComputedStyle(railProbe);
   const right = parseFloat(cs.paddingRight) || 0, left = parseFloat(cs.paddingLeft) || 0;
-  const railSide = right >= 90 ? "right" : left >= 90 ? "left" : "";
+  // A notch or island in landscape insets BOTH sides equally; the Duo's column is on one side only.
+  const oneSided = (a, b) => a >= 40 && b < 12;
+  const railSide = (right >= 70 || oneSided(right, left)) ? "right" : (left >= 70 || oneSided(left, right)) ? "left" : "";
   const root = document.documentElement;
   root.classList.toggle("rail", !!railSide);
   root.classList.toggle("rail-left", railSide === "left");
