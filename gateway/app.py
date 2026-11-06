@@ -3272,7 +3272,14 @@ def x_jobs():
 # the config — and send a result straight to qBittorrent or NZBGet. Download links (which carry
 # indexer API keys) never leave the gateway: the TV only sees an id.
 
-IDX_CATS = {"movies": "2000", "tv": "5000"}
+# Newznab top-level categories. "all" names every one of them explicitly: with no categories at all,
+# Prowlarr and some indexers fall back to their own defaults (often just movies and TV).
+IDX_CATS = {
+    "movies": ["2000"], "tv": ["5000"], "music": ["3000"], "books": ["7000"],
+    "software": ["4000", "1000"],   # PC + console
+    "other": ["8000", "6000"],
+}
+IDX_CATS["all"] = ["1000", "2000", "3000", "4000", "5000", "6000", "7000", "8000"]
 _IDX_RESULTS = {}   # id -> (time, source info for grabbing)
 _IDX_LOCK = threading.Lock()
 
@@ -3309,6 +3316,10 @@ def _cat_label(cats):
             return "Console"
         if 4000 <= i < 5000:
             return "PC"
+        if 6000 <= i < 7000:
+            return "XXX"
+        if 8000 <= i < 9000:
+            return "Other"
     return None
 
 
@@ -3320,8 +3331,7 @@ class Prowlarr:
 
     def search(self, q, kind):
         params = [("query", q), ("type", "search"), ("limit", "100")]
-        if kind in IDX_CATS:
-            params.append(("categories", IDX_CATS[kind]))
+        params += [("categories", c) for c in IDX_CATS.get(kind, IDX_CATS["all"])]
         r = requests.get(f"{self.url}/api/v1/search", params=params, headers={"X-Api-Key": self.key}, timeout=90)
         if r.status_code >= 400:
             raise ApiError(f"{self.name}: HTTP {r.status_code}", 502)
@@ -3361,8 +3371,7 @@ class Newznab:
 
     def search(self, q, kind):
         params = {"t": "search", "q": q, "apikey": self.key, "limit": "100", "extended": "1"}
-        if kind in IDX_CATS:
-            params["cat"] = IDX_CATS[kind]
+        params["cat"] = ",".join(IDX_CATS.get(kind, IDX_CATS["all"]))
         r = requests.get(f"{self.url}{self.api_path}", params=params, timeout=60)
         if r.status_code >= 400:
             raise ApiError(f"{self.name}: HTTP {r.status_code}", 502)

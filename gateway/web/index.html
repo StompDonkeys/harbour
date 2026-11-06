@@ -1983,7 +1983,7 @@ function DownloadsScreen() {
 function IndexerScreen() {
   const p = page({ title: "Search indexers", back: "Downloads" });
   let kind = "all", proto = "all", sort = "best", results = null, errors = [], targets = null, seq = 0;
-  const input = h("input", { type: "search", placeholder: "Movie, show or release name", autocapitalize: "off", autocorrect: "off", enterkeyhint: "search" });
+  const input = h("input", { type: "search", placeholder: "Anything — movie, show, album, book, app…", autocapitalize: "off", autocorrect: "off", enterkeyhint: "search" });
   const form = h("form", { class: "search", onsubmit: e => { e.preventDefault(); input.blur(); run(); } }, svg("search"), input);
   const segKind = h("div", { class: "seg", style: "margin:0 16px 8px" });
   const segProto = h("div", { class: "seg", style: "margin:0 16px 8px" });
@@ -1991,7 +1991,7 @@ function IndexerScreen() {
   const out = h("div", {}, emptyState("Search your indexers", "Type a name and press Search. Results come from Prowlarr and your Newznab indexers."));
   const seg = (box, opts, cur, set) => box.replaceChildren(...opts.map(([k, l]) => h("button", { class: k === cur ? "on" : "", type: "button", onclick: () => set(k) }, l)));
   function drawSegs() {
-    seg(segKind, [["all", "All"], ["movies", "Movies"], ["tv", "TV"]], kind, k => { kind = k; drawSegs(); if (input.value.trim()) run(); });
+    seg(segKind, [["all", "All"], ["movies", "Movies"], ["tv", "TV"], ["music", "Music"], ["books", "Books"], ["software", "Apps"]], kind, k => { kind = k; drawSegs(); if (input.value.trim()) run(); });
     seg(segProto, [["all", "Usenet + torrents"], ["usenet", "Usenet"], ["torrent", "Torrents"]], proto, k => { proto = k; drawSegs(); if (input.value.trim()) run(); });
     seg(segSort, [["best", "Best"], ["size", "Biggest"], ["newest", "Newest"]], sort, k => { sort = k; drawSegs(); draw(); });
   }

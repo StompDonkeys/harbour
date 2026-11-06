@@ -1629,3 +1629,23 @@ def test_file_stream_range_fallback(client):
     assert r.status_code == 206 and r.data == b"3456" and r.headers["Content-Range"] == "bytes 3-6/10"
     r = client.get("/api/files/stream?path=" + quote("/video/a.mp4"), headers={**H, "Range": "bytes=8-"})
     assert r.data == b"89" and r.headers["Content-Length"] == "2"
+
+
+@responses.activate
+def test_indexer_search_all_asks_for_every_category(client, monkeypatch):
+    monkeypatch.setitem(gw.CFG, "prowlarr", {"url": "http://nas:9696", "api_key": "PK"})
+    monkeypatch.setitem(gw.CFG, "newznab", [{"name": "NZBgeek", "url": "https://idx.example", "api_key": "K"}])
+    responses.get("http://nas:9696/api/v1/search", json=[
+        {"guid": "g1", "indexerId": 4, "indexer": "1337x", "title": "Some Album FLAC", "protocol": "torrent",
+         "size": 400000000, "seeders": 12, "categories": [{"id": 3040}]}])
+    responses.get("https://idx.example/api", body=NZB_XML)
+    r = client.get("/api/indexers/search?q=anything&kind=all", headers=H)
+    assert r.status_code == 200, r.data
+    assert next(x for x in r.get_json()["results"] if x["indexer"] == "1337x")["category"] == "Audio"
+    pr = next(c.request.url for c in responses.calls if "9696" in c.request.url)
+    nz = next(c.request.url for c in responses.calls if "idx.example" in c.request.url)
+    for cat in ("1000", "2000", "3000", "4000", "5000", "6000", "7000", "8000"):
+        assert f"categories={cat}" in pr
+    assert "cat=1000%2C2000%2C3000%2C4000%2C5000%2C6000%2C7000%2C8000" in nz
+    r = client.get("/api/indexers/search?q=anything&kind=books", headers=H)
+    assert "categories=7000" in [c.request.url for c in responses.calls if "9696" in c.request.url][-1]
